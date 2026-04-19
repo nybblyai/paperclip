@@ -11,9 +11,11 @@ services:
       timeout: 5s
       retries: 30
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${DB_PORT:?DB_PORT must be set}:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - type: bind
+        source: ${POSTGRES_DATA_DIR:?POSTGRES_DATA_DIR must be set}
+        target: /var/lib/postgresql/data
     restart: unless-stopped
 
   server:
@@ -21,7 +23,7 @@ services:
       context: ..
       dockerfile: Dockerfile
     ports:
-      - "${TAILSCALE_IP:?TAILSCALE_IP must be set}:3100:3100"
+      - "${TAILSCALE_IP:?TAILSCALE_IP must be set}:${APP_PORT:?APP_PORT must be set}:3100"
     environment:
       DATABASE_URL: postgres://paperclip:paperclip@db:5432/paperclip
       PORT: "3100"
@@ -32,12 +34,10 @@ services:
       BETTER_AUTH_BASE_URL: "${PAPERCLIP_PUBLIC_URL:?PAPERCLIP_PUBLIC_URL must be set}"
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
     volumes:
-      - paperclip-data:/paperclip
+      - type: bind
+        source: ${PAPERCLIP_DATA_DIR:?PAPERCLIP_DATA_DIR must be set}
+        target: /paperclip
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  pgdata:
-  paperclip-data:

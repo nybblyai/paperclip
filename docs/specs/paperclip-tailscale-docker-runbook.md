@@ -2,54 +2,130 @@
 
 Run Paperclip in Docker while exposing the app only on the host's Tailscale interface.
 
-## Why this mode
+## Goals
 
-- Paperclip binds only to the host's Tailscale IPv4 address on port `3100`
-- Postgres binds only to `127.0.0.1:5432`
-- No public `0.0.0.0` listener is used for the app
-- This avoids conflicting with any existing `tailscale serve` root already used by other services
+- keep OpenClaw untouched on its existing Tailscale Serve route
+- expose Paperclip only on the host's Tailscale IP
+- make deployment repeatable for both `prod` and `test`
+- keep app and database data persistent across Docker restarts and host reboots
 
-## Compose file
+## Isolation model
 
-Use:
+- OpenClaw stays on Tailscale Serve, currently proxied from `/` to `127.0.0.1:18771`
+- Paperclip does not use Tailscale Serve on this host
+- Paperclip binds directly to the host Tailscale IPv4 only
+- Postgres binds to localhost only
 
-- `docker/docker-compose.tailscale.yml`
+This avoids clobbering the existing OpenClaw route and keeps Paperclip tailnet-only.
 
-Required environment:
+## Deployment files
 
-- `TAILSCALE_IP`
-- `PAPERCLIP_PUBLIC_URL`
-- `BETTER_AUTH_SECRET`
+- `docker/docker-compose.tailscale-stack.yml`
+- `scripts/deploy-paperclip-docker-env.sh`
+- `scripts/run-paperclip-tailscale-docker.sh` (compat wrapper for `prod`)
 
-A helper script is included:
+## Environments
 
-- `scripts/run-paperclip-tailscale-docker.sh`
+`prod`
+- app URL: `http://<tailscale-ip>:3100`
+- db host port: `127.0.0.1:5432`
+- compose project: `paperclip-prod`
+- config: `~/.config/paperclip/prod/runtime.env`
+- data: `~/.local/share/paperclip/prod/`
 
-It derives the current Tailscale IPv4 address, writes a runtime env file to `~/.config/paperclip/tailscale-runtime.env`, preserves the auth secret across restarts, and starts the stack.
+`test`
+- app URL: `http://<tailscale-ip>:3101`
+- db host port: `127.0.0.1:5433`
+- compose project: `paperclip-test`
+- config: `~/.config/paperclip/test/runtime.env`
+- data: `~/.local/share/paperclip/test/`
 
-## Example
+## Persistence
+
+Persistence comes from two layers:
+
+1. Docker service is enabled on the host
+2. Compose services use `restart: unless-stopped`
+
+That means active envs restart after Docker daemon restarts or host reboot.
+
+## Commands
+
+Bring up prod:
 
 ```bash
-./scripts/run-paperclip-tailscale-docker.sh
+./scripts/deploy-paperclip-docker-env.sh prod up
 ```
 
-Manual alternative:
+Bring up test:
 
 ```bash
-export TAILSCALE_IP="100.x.y.z"
-export PAPERCLIP_PUBLIC_URL="http://100.x.y.z:3100"
-export BETTER_AUTH_SECRET="..."
-docker compose -f docker/docker-compose.tailscale.yml up -d --build
+./scripts/deploy-paperclip-docker-env.sh test up
 ```
+
+Restart prod after branch changes:
+
+```bash
+./scripts/deploy-paperclip-docker-env.sh prod restart
+```
+
+Restart test after branch changes:
+
+```bash
+./scripts/deploy-paperclip-docker-env.sh test restart
+```
+
+Check status:
+
+```bash
+./scripts/deploy-paperclip-docker-env.sh prod ps
+./scripts/deploy-paperclip-docker-env.sh test ps
+```
+
+Tail logs:
+
+```bash
+./scripts/deploy-paperclip-docker-env.sh prod logs
+./scripts/deploy-paperclip-docker-env.sh test logs
+```
+
+Stop an env:
+
+```bash
+./scripts/deploy-paperclip-docker-env.sh prod down
+./scripts/deploy-paperclip-docker-env.sh test down
+```
+
+Bootstrap first admin invite after onboarding exists:
+
+```bash
+./scripts/deploy-paperclip-docker-env.sh prod bootstrap-ceo
+```
+
+## What the deploy script manages
+
+For each env it:
+
+- derives the current Tailscale IPv4 address
+- writes runtime env to `~/.config/paperclip/<env>/runtime.env`
+- preserves `BETTER_AUTH_SECRET` across redeploys
+- uses a stable compose project name per env
+- stores Paperclip and Postgres data under `~/.local/share/paperclip/<env>/`
+- sets `BETTER_AUTH_BASE_URL` from `PAPERCLIP_PUBLIC_URL` through compose so auth redirects stay correct over Tailscale
 
 ## Verify
 
 ```bash
-ss -ltnp | grep 3100
-curl -I http://$TAILSCALE_IP:3100
+ss -ltnp | egrep '(:3100|:3101|:5432|:5433)'
+curl -I http://$(tailscale ip -4 | head -n1):3100
 ```
 
-Expected:
+Expected for prod:
 
 - `3100` listens only on the Tailscale IP
 - `5432` listens only on `127.0.0.1`
+
+Expected for test when enabled:
+
+- `3101` listens only on the Tailscale IP
+- `5433` listens only on `127.0.0.1`
