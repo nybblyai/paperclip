@@ -22,11 +22,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    ports:
-      - "${TAILSCALE_IP:?TAILSCALE_IP must be set}:${APP_PORT:?APP_PORT must be set}:3100"
+    network_mode: host
     environment:
-      DATABASE_URL: postgres://paperclip:paperclip@db:5432/paperclip
-      PORT: "3100"
+      DATABASE_URL: postgres://paperclip:paperclip@127.0.0.1:${DB_PORT:?DB_PORT must be set}/paperclip
+      PORT: "${APP_PORT:?APP_PORT must be set}"
       SERVE_UI: "true"
       PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
       PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
@@ -35,10 +34,15 @@ services:
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       CODEX_HOME: /paperclip/.shared-codex
+      USER_UID: "${OPENCLAW_HOST_UID:-1000}"
+      USER_GID: "${OPENCLAW_HOST_GID:-1000}"
     volumes:
       - type: bind
         source: ${PAPERCLIP_DATA_DIR:?PAPERCLIP_DATA_DIR must be set}
         target: /paperclip
+      - type: bind
+        source: ${OPENCLAW_HOST_WORKSPACE_DIR:-/home/openclaw/.openclaw/workspace}
+        target: /home/openclaw/.openclaw/workspace
     depends_on:
       db:
         condition: service_healthy

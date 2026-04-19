@@ -12,6 +12,9 @@ import {
   stringifyPaperclipWakePayload,
 } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { WebSocket } from "ws";
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
@@ -331,9 +334,55 @@ function resolvePaperclipApiUrlOverride(value: unknown): string | null {
 }
 
 const DEFAULT_CLAIMED_API_KEY_PATH = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
+const OPENCLAW_WORKSPACE_HOME_PREFIX = "~/.openclaw/workspace/";
+const OPENCLAW_WORKSPACE_ABSOLUTE_PREFIX = "/home/openclaw/.openclaw/workspace/";
 
 function resolveClaimedApiKeyPath(value: unknown): string {
   return nonEmpty(value) ?? DEFAULT_CLAIMED_API_KEY_PATH;
+}
+
+function resolveClaimedApiKeyWritePath(displayPath: string): string {
+  const raw = displayPath.trim();
+  if (raw.startsWith(OPENCLAW_WORKSPACE_HOME_PREFIX)) {
+    return path.join(OPENCLAW_WORKSPACE_ABSOLUTE_PREFIX, raw.slice(OPENCLAW_WORKSPACE_HOME_PREFIX.length));
+  }
+  if (raw.startsWith("~/")) {
+    return path.join(os.homedir(), raw.slice(2));
+  }
+  return raw;
+}
+
+async function materializeClaimedApiKey(params: {
+  displayPath: string;
+  authToken: string;
+  apiUrl: string | null;
+}): Promise<{ ok: true; writePath: string } | { ok: false; writePath: string; error: string }> {
+  const writePath = resolveClaimedApiKeyWritePath(params.displayPath);
+  try {
+    await fs.mkdir(path.dirname(writePath), { recursive: true });
+    await fs.writeFile(
+      writePath,
+      JSON.stringify(
+        {
+          token: params.authToken,
+          apiUrl: params.apiUrl,
+          source: "paperclip.local-agent-jwt",
+          writtenAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ) + "\n",
+      { mode: 0o600 },
+    );
+    await fs.chmod(writePath, 0o600);
+    return { ok: true, writePath };
+  } catch (error) {
+    return {
+      ok: false,
+      writePath,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: WakePayload): Record<string, string> {
@@ -362,8 +411,9 @@ function buildWakeText(
   payload: WakePayload,
   paperclipEnv: Record<string, string>,
   structuredWakePrompt: string,
+  options?: { claimedApiKeyPath?: string | null; claimedApiKeyProvisioned?: boolean },
 ): string {
-  const claimedApiKeyPath = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
+  const claimedApiKeyPath = options?.claimedApiKeyPath ?? DEFAULT_CLAIMED_API_KEY_PATH;
   const orderedKeys = [
     "PAPERCLIP_RUN_ID",
     "PAPERCLIP_AGENT_ID",
@@ -387,6 +437,18 @@ function buildWakeText(
   const issueIdHint = payload.taskId ?? payload.issueId ?? "";
   const apiBaseHint = paperclipEnv.PAPERCLIP_API_URL ?? "<set PAPERCLIP_API_URL>";
 
+  const apiKeyLines = options?.claimedApiKeyProvisioned
+    ? [
+        `PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`,
+        "",
+        `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath}. Paperclip refreshed this file for the current run.`,
+      ]
+    : [
+        `PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`,
+        "",
+        `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token you saved after claim-api-key).`,
+      ];
+
   const lines = [
     "Paperclip wake event for a cloud adapter.",
     "",
@@ -394,9 +456,7 @@ function buildWakeText(
     "",
     "Set these values in your run context:",
     ...envLines,
-    `PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`,
-    "",
-    `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token you saved after claim-api-key).`,
+    ...apiKeyLines,
     "",
     `api_base=${apiBaseHint}`,
     `task_id=${payload.taskId ?? ""}`,
@@ -1101,6 +1161,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const wakePayload = buildWakePayload(ctx);
   const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
+  const claimedApiKeyPath = resolveClaimedApiKeyPath(ctx.config.claimedApiKeyPath);
+  let claimedApiKeyProvisioned = false;
+  if (ctx.authToken) {
+    const materialized = await materializeClaimedApiKey({
+      displayPath: claimedApiKeyPath,
+      authToken: ctx.authToken,
+      apiUrl: paperclipEnv.PAPERCLIP_API_URL ?? null,
+    });
+    if (materialized.ok) {
+      claimedApiKeyProvisioned = true;
+      await ctx.onLog(
+        "stdout",
+        `[openclaw-gateway] refreshed PAPERCLIP_API_KEY artifact at ${claimedApiKeyPath}\n`,
+      );
+    } else {
+      await ctx.onLog(
+        "stderr",
+        `[openclaw-gateway] failed to refresh PAPERCLIP_API_KEY artifact at ${claimedApiKeyPath}: ${materialized.error}\n`,
+      );
+    }
+  }
   const structuredWakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake);
   const structuredWakeJson = stringifyPaperclipWakePayload(ctx.context.paperclipWake);
   const wakeText = buildWakeText(
@@ -1109,6 +1190,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     structuredWakeJson
       ? joinWakePayloadSections(structuredWakePrompt, structuredWakeJson)
       : structuredWakePrompt,
+    { claimedApiKeyPath, claimedApiKeyProvisioned },
   );
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
