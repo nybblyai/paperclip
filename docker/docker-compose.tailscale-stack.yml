@@ -33,6 +33,8 @@ services:
       PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:?PAPERCLIP_PUBLIC_URL must be set}"
       BETTER_AUTH_BASE_URL: "${PAPERCLIP_PUBLIC_URL:?PAPERCLIP_PUBLIC_URL must be set}"
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      CODEX_HOME: /paperclip/.shared-codex
     volumes:
       - type: bind
         source: ${PAPERCLIP_DATA_DIR:?PAPERCLIP_DATA_DIR must be set}

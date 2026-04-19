@@ -26,4 +26,7 @@ if [ "$changed" = "1" ]; then
     chown -R node:node /paperclip
 fi
 
+mkdir -p /paperclip/.codex /paperclip/instances/default/data/run-logs /paperclip/instances/default/logs
+chown -R node:node /paperclip/.codex /paperclip/instances/default/data /paperclip/instances/default/logs
+
 exec gosu node "$@"
