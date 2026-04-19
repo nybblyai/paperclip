@@ -71,6 +71,12 @@ type PendingRequest = {
   timer: ReturnType<typeof setTimeout> | null;
 };
 
+type ObservedTerminalRunState = {
+  status: "ok" | "error" | "timeout";
+  error: string | null;
+  source: "event";
+};
+
 type GatewayResponseError = Error & {
   gatewayCode?: string;
   gatewayDetails?: Record<string, unknown>;
@@ -107,6 +113,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function nonEmpty(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+export function isTerminalLifecyclePhase(phase: string | null): boolean {
+  return phase === "end" || phase === "error" || phase === "failed" || phase === "cancelled";
 }
 
 function parseOptionalPositiveInteger(value: unknown): number | null {
@@ -1293,6 +1303,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const assistantChunks: string[] = [];
     let lifecycleError: string | null = null;
     let deviceIdentity: GatewayDeviceIdentity | null = null;
+    let resolveObservedTerminalState: ((value: ObservedTerminalRunState) => void) | null = null;
+    const observedTerminalState = new Promise<ObservedTerminalRunState>((resolve) => {
+      resolveObservedTerminalState = resolve;
+    });
 
     const onEvent = async (frame: GatewayEventFrame) => {
       if (frame.event !== "agent") {
@@ -1338,6 +1352,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const phase = nonEmpty(data.phase)?.toLowerCase();
         if (phase === "error" || phase === "failed" || phase === "cancelled") {
           lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
+        }
+        if (isTerminalLifecyclePhase(phase ?? null)) {
+          resolveObservedTerminalState?.({
+            source: "event",
+            status:
+              phase === "error" || phase === "failed" || phase === "cancelled"
+                ? "error"
+                : parseBoolean(data.aborted, false)
+                  ? "timeout"
+                  : "ok",
+            error: nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError,
+          });
+          resolveObservedTerminalState = null;
         }
       }
     };
@@ -1444,15 +1471,53 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
 
       if (acceptedStatus !== "ok") {
-        const waitPayload = await client.request<Record<string, unknown>>(
+        const waitOutcome = await Promise.race([
+          client
+            .request<Record<string, unknown>>(
           "agent.wait",
           { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
           { timeoutMs: waitTimeoutMs + connectTimeoutMs },
-        );
+            )
+            .then((payload) => ({ source: "wait" as const, payload }))
+            .catch((error) => ({ source: "wait-error" as const, error })),
+          observedTerminalState,
+        ]);
+
+        if ("source" in waitOutcome && waitOutcome.source === "wait-error") {
+          throw waitOutcome.error;
+        }
+
+        const waitPayload =
+          "source" in waitOutcome && waitOutcome.source === "wait"
+            ? waitOutcome.payload
+            : {
+                runId: acceptedRunId,
+                status: waitOutcome.status,
+                ...(waitOutcome.error ? { error: waitOutcome.error } : {}),
+              };
 
         latestResultPayload = waitPayload;
 
-        const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+        let waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+        if (waitStatus === "timeout") {
+          const lateTerminalState = await Promise.race([
+            observedTerminalState,
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
+          ]);
+          if (lateTerminalState) {
+            waitStatus = lateTerminalState.status;
+            latestResultPayload = {
+              runId: acceptedRunId,
+              status: lateTerminalState.status,
+              ...(lateTerminalState.error ? { error: lateTerminalState.error } : {}),
+            };
+            await ctx.onLog(
+              "stdout",
+              `[openclaw-gateway] recovered terminal status from streamed lifecycle events after agent.wait timeout runId=${acceptedRunId} status=${lateTerminalState.status}\n`,
+            );
+          }
+        }
+
         if (waitStatus === "timeout") {
           return {
             exitCode: 1,

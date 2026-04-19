@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveClaimedApiKeyPath, resolveSessionKey } from "./execute.js";
+import { isTerminalLifecyclePhase, resolveClaimedApiKeyPath, resolveSessionKey } from "./execute.js";
 
 describe("resolveSessionKey", () => {
   it("prefixes run-scoped session keys with the configured agent", () => {
@@ -82,5 +82,20 @@ describe("resolveClaimedApiKeyPath", () => {
         agentId: "agent-1",
       }),
     ).toBe("/srv/paperclip-bridge/claimed-keys/company-1/agent-1.json");
+  });
+});
+
+describe("isTerminalLifecyclePhase", () => {
+  it("recognizes terminal lifecycle phases emitted by OpenClaw", () => {
+    expect(isTerminalLifecyclePhase("end")).toBe(true);
+    expect(isTerminalLifecyclePhase("error")).toBe(true);
+    expect(isTerminalLifecyclePhase("failed")).toBe(true);
+    expect(isTerminalLifecyclePhase("cancelled")).toBe(true);
+  });
+
+  it("ignores non-terminal lifecycle phases", () => {
+    expect(isTerminalLifecyclePhase("start")).toBe(false);
+    expect(isTerminalLifecyclePhase("progress")).toBe(false);
+    expect(isTerminalLifecyclePhase(null)).toBe(false);
   });
 });
