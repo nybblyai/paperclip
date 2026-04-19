@@ -102,6 +102,17 @@ PY
 )"
 fi
 
+: "${GIT_COMMIT_NAME:=}"
+: "${GIT_COMMIT_EMAIL:=}"
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  if [[ -z "$GIT_COMMIT_NAME" ]]; then
+    GIT_COMMIT_NAME="$(gh api user --jq '(.name // .login)' 2>/dev/null || true)"
+  fi
+  if [[ -z "$GIT_COMMIT_EMAIL" ]]; then
+    GIT_COMMIT_EMAIL="$(gh api user --jq '(.id|tostring) + "+" + .login + "@users.noreply.github.com"' 2>/dev/null || true)"
+  fi
+fi
+
 cat > "$ENV_FILE" <<EOF
 ENV_NAME=${ENV_NAME}
 COMPOSE_PROJECT=${COMPOSE_PROJECT}
@@ -115,6 +126,8 @@ BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
 PAPERCLIP_AGENT_JWT_SECRET=${PAPERCLIP_AGENT_JWT_SECRET}
 OPENAI_API_KEY=${OPENAI_API_KEY}
 PAPERCLIP_OPENCLAW_BRIDGE_HOST_DIR=${PAPERCLIP_OPENCLAW_BRIDGE_HOST_DIR}
+GIT_COMMIT_NAME=${GIT_COMMIT_NAME}
+GIT_COMMIT_EMAIL=${GIT_COMMIT_EMAIL}
 EOF
 chmod 600 "$ENV_FILE"
 

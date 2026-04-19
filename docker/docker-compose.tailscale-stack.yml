@@ -35,6 +35,8 @@ services:
       PAPERCLIP_AGENT_JWT_SECRET: "${PAPERCLIP_AGENT_JWT_SECRET:?PAPERCLIP_AGENT_JWT_SECRET must be set}"
       PAPERCLIP_OPENCLAW_BRIDGE_DIR: "${PAPERCLIP_OPENCLAW_BRIDGE_DIR:-/home/openclaw/.local/share/paperclip-openclaw-bridge}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GIT_COMMIT_NAME: "${GIT_COMMIT_NAME:-}"
+      GIT_COMMIT_EMAIL: "${GIT_COMMIT_EMAIL:-}"
       CODEX_HOME: /paperclip/.shared-codex
       USER_UID: "${OPENCLAW_HOST_UID:-1000}"
       USER_GID: "${OPENCLAW_HOST_GID:-1000}"
