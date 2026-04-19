@@ -2827,9 +2827,18 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
   const statusInfo = runStatusIcons[run.status] ?? { icon: Clock, color: "text-neutral-400" };
   const StatusIcon = statusInfo.icon;
   const metrics = runMetrics(run);
-  const summary = run.resultJson
-    ? String((run.resultJson as Record<string, unknown>).summary ?? (run.resultJson as Record<string, unknown>).result ?? "")
+  const resultJson = asRecord(run.resultJson);
+  const summary = resultJson
+    ? String(resultJson.summary ?? resultJson.result ?? "")
     : run.error ?? "";
+  const openClawRunId = asNonEmptyString(run.externalRunId)
+    ?? asNonEmptyString(resultJson?.externalRunId)
+    ?? asNonEmptyString(resultJson?.runId);
+  const openClawSessionKey = (openClawRunId || asNonEmptyString(resultJson?.sessionKey))
+    ? asNonEmptyString(resultJson?.sessionKey)
+      ?? asNonEmptyString(run.sessionIdAfter)
+      ?? asNonEmptyString(run.sessionIdBefore)
+    : null;
 
   return (
     <Link
@@ -2866,6 +2875,16 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
         <div className="flex items-center gap-2 pl-5.5 text-[11px] text-muted-foreground tabular-nums">
           {metrics.totalTokens > 0 && <span>{formatTokens(metrics.totalTokens)} tok</span>}
           {metrics.cost > 0 && <span>${metrics.cost.toFixed(3)}</span>}
+        </div>
+      )}
+      {(openClawRunId || openClawSessionKey) && (
+        <div className="flex flex-col gap-0.5 pl-5.5 text-[10px] text-muted-foreground font-mono">
+          {openClawRunId && (
+            <span className="truncate">OC run: {openClawRunId}</span>
+          )}
+          {openClawSessionKey && (
+            <span className="truncate">OC session: {openClawSessionKey}</span>
+          )}
         </div>
       )}
     </Link>
