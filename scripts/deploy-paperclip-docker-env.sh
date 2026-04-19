@@ -41,10 +41,11 @@ ENV_FILE="${CONFIG_DIR}/runtime.env"
 COMPOSE_PROJECT="paperclip-${ENV_NAME}"
 PAPERCLIP_DATA_DIR="${STATE_DIR}/paperclip"
 POSTGRES_DATA_DIR="${STATE_DIR}/postgres"
+PAPERCLIP_OPENCLAW_BRIDGE_HOST_DIR="${HOME}/.local/share/paperclip-openclaw-bridge"
 SHARED_CODEX_DIR="${PAPERCLIP_DATA_DIR}/.shared-codex"
 PAPERCLIP_PUBLIC_URL="http://${TAILSCALE_IP}:${APP_PORT}"
 
-mkdir -p "$CONFIG_DIR" "$PAPERCLIP_DATA_DIR" "$POSTGRES_DATA_DIR" "$SHARED_CODEX_DIR"
+mkdir -p "$CONFIG_DIR" "$PAPERCLIP_DATA_DIR" "$POSTGRES_DATA_DIR" "$SHARED_CODEX_DIR" "$PAPERCLIP_OPENCLAW_BRIDGE_HOST_DIR"
 chmod 700 "$CONFIG_DIR"
 
 # Normalize ownership for bind-mounted persistent data so container users can read/write
@@ -52,7 +53,8 @@ chmod 700 "$CONFIG_DIR"
 docker run --rm \
   -v "$PAPERCLIP_DATA_DIR:/paperclip" \
   -v "$POSTGRES_DATA_DIR:/postgres" \
-  alpine sh -c 'mkdir -p /paperclip/.shared-codex && chown -R 1000:1000 /paperclip && chown -R 70:70 /postgres'
+  -v "$PAPERCLIP_OPENCLAW_BRIDGE_HOST_DIR:/bridge" \
+  alpine sh -c 'mkdir -p /paperclip/.shared-codex /bridge/claimed-keys && chown -R 1000:1000 /paperclip /bridge && chown -R 70:70 /postgres'
 
 if [[ -d "${HOME}/.codex" ]]; then
   docker run --rm \
@@ -112,6 +114,7 @@ POSTGRES_DATA_DIR=${POSTGRES_DATA_DIR}
 BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
 PAPERCLIP_AGENT_JWT_SECRET=${PAPERCLIP_AGENT_JWT_SECRET}
 OPENAI_API_KEY=${OPENAI_API_KEY}
+PAPERCLIP_OPENCLAW_BRIDGE_HOST_DIR=${PAPERCLIP_OPENCLAW_BRIDGE_HOST_DIR}
 EOF
 chmod 600 "$ENV_FILE"
 
