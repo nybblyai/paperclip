@@ -1487,6 +1487,20 @@ function resolveNextSessionState(input: {
   };
 }
 
+export function resolveExternalRunId(input: {
+  adapterResult: AdapterExecutionResult;
+  persistedResultJson: Record<string, unknown> | null;
+}): string | null {
+  const result = input.persistedResultJson;
+  return (
+    readNonEmptyString(result?.externalRunId)
+    ?? readNonEmptyString(result?.runId)
+    ?? readNonEmptyString(result?.acceptedRunId)
+    ?? readNonEmptyString(input.adapterResult.errorMeta?.externalRunId)
+    ?? null
+  );
+}
+
 export function heartbeatService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
@@ -4007,6 +4021,10 @@ export function heartbeatService(db: Db) {
         adapterResult.resultJson ?? null,
         adapterResult.summary ?? null,
       );
+      const externalRunId = resolveExternalRunId({
+        adapterResult,
+        persistedResultJson,
+      });
 
       await setRunStatus(run.id, status, {
         finishedAt: new Date(),
@@ -4029,6 +4047,7 @@ export function heartbeatService(db: Db) {
         signal: adapterResult.signal,
         usageJson,
         resultJson: persistedResultJson,
+        externalRunId,
         sessionIdAfter: nextSessionState.displayId ?? nextSessionState.legacySessionId,
         stdoutExcerpt,
         stderrExcerpt,

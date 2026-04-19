@@ -485,6 +485,15 @@ describe("openclaw gateway adapter execute", () => {
       expect(result.timedOut).toBe(false);
       expect(result.summary).toContain("chachacha");
       expect(result.provider).toBe("openclaw");
+      expect(result.sessionDisplayId).toBe("paperclip:issue:issue-123");
+      expect(result.sessionParams).toEqual({
+        sessionKey: "paperclip:issue:issue-123",
+      });
+      expect(result.resultJson).toMatchObject({
+        runId: "run-123",
+        externalRunId: "run-123",
+        sessionKey: "paperclip:issue:issue-123",
+      });
 
       const payload = gateway.getAgentPayload();
       expect(payload).toBeTruthy();
@@ -554,6 +563,11 @@ describe("openclaw gateway adapter execute", () => {
       );
 
       expect(result.exitCode).toBe(0);
+      expect(result.sessionDisplayId).toBe("paperclip:issue:issue-123");
+      expect(result.resultJson).toMatchObject({
+        externalRunId: "run-123",
+        sessionKey: "paperclip:issue:issue-123",
+      });
       expect(result.runtimeServices).toEqual([
         expect.objectContaining({
           serviceName: "preview",

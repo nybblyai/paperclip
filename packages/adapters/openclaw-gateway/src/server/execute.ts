@@ -115,6 +115,23 @@ function nonEmpty(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function withExecutionRefs(
+  payload: Record<string, unknown> | null,
+  refs: {
+    externalRunId?: string | null;
+    sessionKey?: string | null;
+    agentId?: string | null;
+  },
+): Record<string, unknown> | null {
+  if (!payload && !refs.externalRunId && !refs.sessionKey && !refs.agentId) return payload;
+  return {
+    ...(payload ?? {}),
+    ...(refs.externalRunId ? { externalRunId: refs.externalRunId } : {}),
+    ...(refs.sessionKey ? { sessionKey: refs.sessionKey } : {}),
+    ...(refs.agentId ? { agentId: refs.agentId } : {}),
+  };
+}
+
 export function isTerminalLifecyclePhase(phase: string | null): boolean {
   return phase === "end" || phase === "error" || phase === "failed" || phase === "cancelled";
 }
@@ -1243,11 +1260,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
   const message = templateMessage ? appendWakeText(templateMessage, wakeText) : wakeText;
-  buildStandardPaperclipPayload(ctx, wakePayload, paperclipEnv, payloadTemplate);
+  const standardPaperclipPayload = buildStandardPaperclipPayload(ctx, wakePayload, paperclipEnv, payloadTemplate);
 
   const agentParams: Record<string, unknown> = {
     ...payloadTemplate,
     message,
+    paperclip: standardPaperclipPayload,
     sessionKey,
     idempotencyKey: ctx.runId,
   };
@@ -1446,10 +1464,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         timeoutMs: connectTimeoutMs,
       });
 
-      latestResultPayload = acceptedPayload;
-
       const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
       const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
+      latestResultPayload = withExecutionRefs(acceptedPayload, {
+        externalRunId: acceptedRunId,
+        sessionKey,
+        agentId: configuredAgentId,
+      });
       trackedRunIds.add(acceptedRunId);
 
       await ctx.onLog(
@@ -1466,7 +1487,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           timedOut: false,
           errorMessage,
           errorCode: "openclaw_gateway_agent_error",
-          resultJson: acceptedPayload,
+          resultJson: withExecutionRefs(acceptedPayload, {
+            externalRunId: acceptedRunId,
+            sessionKey,
+            agentId: configuredAgentId,
+          }),
+          sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+          sessionDisplayId: sessionKey,
         };
       }
 
@@ -1496,7 +1523,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 ...(waitOutcome.error ? { error: waitOutcome.error } : {}),
               };
 
-        latestResultPayload = waitPayload;
+        latestResultPayload = withExecutionRefs(waitPayload, {
+          externalRunId: acceptedRunId,
+          sessionKey,
+          agentId: configuredAgentId,
+        });
 
         let waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
         if (waitStatus === "timeout") {
@@ -1506,11 +1537,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ]);
           if (lateTerminalState) {
             waitStatus = lateTerminalState.status;
-            latestResultPayload = {
+            latestResultPayload = withExecutionRefs({
               runId: acceptedRunId,
               status: lateTerminalState.status,
               ...(lateTerminalState.error ? { error: lateTerminalState.error } : {}),
-            };
+            }, {
+              externalRunId: acceptedRunId,
+              sessionKey,
+              agentId: configuredAgentId,
+            });
             await ctx.onLog(
               "stdout",
               `[openclaw-gateway] recovered terminal status from streamed lifecycle events after agent.wait timeout runId=${acceptedRunId} status=${lateTerminalState.status}\n`,
@@ -1525,7 +1560,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             timedOut: true,
             errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
             errorCode: "openclaw_gateway_wait_timeout",
-            resultJson: waitPayload,
+            resultJson: withExecutionRefs(waitPayload, {
+              externalRunId: acceptedRunId,
+              sessionKey,
+              agentId: configuredAgentId,
+            }),
+            sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+            sessionDisplayId: sessionKey,
           };
         }
 
@@ -1539,7 +1580,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               lifecycleError ??
               "OpenClaw gateway run failed",
             errorCode: "openclaw_gateway_wait_error",
-            resultJson: waitPayload,
+            resultJson: withExecutionRefs(waitPayload, {
+              externalRunId: acceptedRunId,
+              sessionKey,
+              agentId: configuredAgentId,
+            }),
+            sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+            sessionDisplayId: sessionKey,
           };
         }
 
@@ -1550,7 +1597,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             timedOut: false,
             errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
             errorCode: "openclaw_gateway_wait_status_unexpected",
-            resultJson: waitPayload,
+            resultJson: withExecutionRefs(waitPayload, {
+              externalRunId: acceptedRunId,
+              sessionKey,
+              agentId: configuredAgentId,
+            }),
+            sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+            sessionDisplayId: sessionKey,
           };
         }
       }
@@ -1591,11 +1644,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         exitCode: 0,
         signal: null,
         timedOut: false,
+        sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+        sessionDisplayId: sessionKey,
         provider,
         ...(model ? { model } : {}),
         ...(usage ? { usage } : {}),
         ...(costUsd > 0 ? { costUsd } : {}),
-        resultJson: asRecord(latestResultPayload),
+        resultJson: withExecutionRefs(asRecord(latestResultPayload), {
+          externalRunId: acceptedRunId,
+          sessionKey,
+          agentId: configuredAgentId,
+        }),
         ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
         ...(summary ? { summary } : {}),
       };
@@ -1657,7 +1716,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           : pairingRequired
             ? "openclaw_gateway_pairing_required"
             : "openclaw_gateway_request_failed",
-        resultJson: asRecord(latestResultPayload),
+        resultJson: withExecutionRefs(asRecord(latestResultPayload), {
+          externalRunId: nonEmpty(asRecord(latestResultPayload)?.externalRunId) ?? nonEmpty(asRecord(latestResultPayload)?.runId) ?? null,
+          sessionKey,
+          agentId: configuredAgentId,
+        }),
+        sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+        sessionDisplayId: sessionKey,
       };
     } finally {
       client.close();
