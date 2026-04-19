@@ -38,6 +38,7 @@ Request behavior fields:
 - paperclipApiUrl (string, optional): absolute Paperclip base URL advertised in wake text
 - bridgeDir (string, optional): shared Paperclip/OpenClaw bridge directory used to derive claimed-key artifact paths (default ~/.local/share/paperclip-openclaw-bridge, or PAPERCLIP_OPENCLAW_BRIDGE_DIR when set)
 - claimedApiKeyPath (string, optional): explicit path to the claimed API key JSON file read by the agent at wake time (overrides bridgeDir and PAPERCLIP_CLAIMED_API_KEY_PATH)
+- agentId (string, recommended): target existing OpenClaw agent id for direct mapping, for example main, ork, stitch, or personal-os
 
 Session routing fields:
 - sessionKeyStrategy (string, optional): issue (default), fixed, or run

@@ -827,6 +827,25 @@ export function normalizeAgentDefaultsForJoin(input: {
     normalized.sessionKey = sessionKey;
   }
 
+  const directMappedAgentId = nonEmptyTrimmedString(defaults.agentId);
+  if (directMappedAgentId) {
+    normalized.agentId = directMappedAgentId;
+    diagnostics.push({
+      code: "openclaw_gateway_agent_id_configured",
+      level: "info",
+      message: `OpenClaw direct-mapping agent id configured as ${directMappedAgentId}.`
+    });
+  } else {
+    diagnostics.push({
+      code: "openclaw_gateway_agent_id_missing",
+      level: "warn",
+      message:
+        "No OpenClaw agentId was provided. Direct mapping works best when Paperclip points at a specific existing OpenClaw agent.",
+      hint:
+        "Set agentDefaultsPayload.agentId to an existing OpenClaw agent id such as main, ork, stitch, or personal-os."
+    });
+  }
+
   const role = nonEmptyTrimmedString(defaults.role);
   if (role) {
     normalized.role = role;
@@ -1424,7 +1443,7 @@ function buildInviteOnboardingManifest(
     ),
     onboarding: {
       instructions:
-        "Join as an OpenClaw Gateway agent, save your one-time claim secret, wait for board approval, then claim your API key. Save the claim response token to a dedicated Paperclip/OpenClaw bridge path, for example ~/.local/share/paperclip-openclaw-bridge/claimed-keys/<companyId>/<agentId>.json, and load PAPERCLIP_API_KEY from that file before starting heartbeat loops. Use agentDefaultsPayload.bridgeDir or claimedApiKeyPath to avoid depending on general OpenClaw workspace contents. You MUST submit adapterType='openclaw_gateway', set agentDefaultsPayload.url to your ws:// or wss:// OpenClaw gateway endpoint, and include agentDefaultsPayload.headers.x-openclaw-token (or legacy x-openclaw-auth).",
+        "Join as an OpenClaw Gateway agent, save your one-time claim secret, wait for board approval, then claim your API key. Save the claim response token to a dedicated Paperclip/OpenClaw bridge path, for example ~/.local/share/paperclip-openclaw-bridge/claimed-keys/<companyId>/<agentId>.json, and load PAPERCLIP_API_KEY from that file before starting heartbeat loops. Use agentDefaultsPayload.bridgeDir or claimedApiKeyPath to avoid depending on general OpenClaw workspace contents. For direct mapping, create the agent in OpenClaw first and set agentDefaultsPayload.agentId to that existing OpenClaw agent id. You MUST submit adapterType='openclaw_gateway', set agentDefaultsPayload.url to your ws:// or wss:// OpenClaw gateway endpoint, and include agentDefaultsPayload.headers.x-openclaw-token (or legacy x-openclaw-auth).",
       inviteMessage: extractInviteMessage(invite),
       recommendedAdapterType: "openclaw_gateway",
       requiredFields: {
@@ -1433,7 +1452,7 @@ function buildInviteOnboardingManifest(
         adapterType: "Use 'openclaw_gateway' for OpenClaw Gateway agents",
         capabilities: "Optional capability summary",
         agentDefaultsPayload:
-          "Adapter config for OpenClaw gateway. MUST include url (ws:// or wss://) and headers.x-openclaw-token (or legacy x-openclaw-auth). Optional fields: paperclipApiUrl, waitTimeoutMs, sessionKeyStrategy, sessionKey, role, scopes, disableDeviceAuth, devicePrivateKeyPem."
+          "Adapter config for OpenClaw gateway. MUST include url (ws:// or wss://), headers.x-openclaw-token (or legacy x-openclaw-auth), and for direct mapping should include agentId naming the existing OpenClaw agent. Optional fields: paperclipApiUrl, waitTimeoutMs, sessionKeyStrategy, sessionKey, role, scopes, disableDeviceAuth, devicePrivateKeyPem."
       },
       registrationEndpoint: {
         method: "POST",
@@ -1571,6 +1590,7 @@ export function buildInviteOnboardingTextDocument(
         agentDefaultsPayload: {
           url: "ws://127.0.0.1:18789",
           paperclipApiUrl: "http://host.docker.internal:3100",
+          agentId: "main",
           headers: { "x-openclaw-token": token },
           waitTimeoutMs: 120000,
           sessionKeyStrategy: "issue",
@@ -1587,6 +1607,7 @@ export function buildInviteOnboardingTextDocument(
   }
 
     IMPORTANT: You MUST include agentDefaultsPayload.headers.x-openclaw-token with your gateway token.
+    For direct mapping, create the runtime agent in OpenClaw first and set agentDefaultsPayload.agentId to that exact OpenClaw agent id.
     Legacy x-openclaw-auth is also accepted, but x-openclaw-token is preferred.
     Use adapterType "openclaw_gateway" and a ws:// or wss:// gateway URL.
     Pairing mode requirement:
@@ -1604,6 +1625,7 @@ export function buildInviteOnboardingTextDocument(
       "agentDefaultsPayload": {
         "url": "wss://your-openclaw-gateway.example",
         "paperclipApiUrl": "https://paperclip-hostname-your-agent-can-reach:3100",
+        "agentId": "main",
         "headers": { "x-openclaw-token": "replace-me" },
         "waitTimeoutMs": 120000,
         "sessionKeyStrategy": "issue",
