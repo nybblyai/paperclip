@@ -2,7 +2,7 @@
 
 Status: draft, implementation-facing  
 Date: 2026-04-19  
-Scope: section 6 starter slice for mission-control integration glue
+Scope: sections 6 and 7 starter slices for mission-control integration glue and Telegram emergence behavior
 
 ### 1. Purpose
 
@@ -15,10 +15,7 @@ This slice covers only:
 - when a message must become a structured Paperclip update versus remaining chat/comment text
 - task-status sync rules for mapping OpenClaw-side progress onto existing Paperclip issue status
 - specialty-routing policy for deciding which of those mapped actors should own or execute the next durable Paperclip slice
-
-This slice does not yet define:
-
-- Telegram emergence rules
+- Telegram emergence rules derived from existing issue state, mission-control metadata, activity summaries, and linked approvals
 
 ### 2. Reuse-First Constraints
 
@@ -414,7 +411,135 @@ This slice defines sync semantics only.
 
 It does not require a specific automation path, webhook, or heartbeat hook in this pass. Later implementation may apply these rules through explicit issue updates, adapter callbacks, or other existing integration surfaces, but any implementation must preserve the contract in sections 9.1 through 9.6.
 
-### 10. Operational Consequences
+### 10. Telegram Emergence And Summary Behavior
+
+#### 10.1 Canonical rule
+
+Telegram-visible mission-control output is a projection of existing Paperclip structured state. It is not a second durable workflow system.
+
+Telegram emergence for a tracked issue must be derived from the same existing control-plane primitives already defined in this spec:
+
+- `issues` core fields such as `title`, `status`, `priority`, `ownerAgentId`, and `assigneeAgentId`
+- mission-control metadata such as `missionControl.nextStep`, `missionControl.blocker`, `missionControl.needsHumanAttention`, `missionControl.workflowState`, and `missionControl.handoff`
+- structured activity summaries already derived from `issue.updated` and `issue.handoff_updated`
+- linked Paperclip approvals when an issue has approval objects attached to it
+
+It must not require:
+
+- a Telegram-only state store
+- transcript parsing to reconstruct durable owner, blocker, or next-step truth
+- a second routing model separate from existing issue ownership and mission-control metadata
+
+Rule: if Telegram would need to reread raw comments to know who owns the work, what is blocked, or what happens next, the underlying Paperclip write was too unstructured.
+
+#### 10.2 Source precedence
+
+When Telegram builds a summary for a tracked issue, it should read sources in this order:
+
+1. current structured issue state and mission-control metadata
+2. the latest structured activity summary from `issue.updated` or `issue.handoff_updated`
+3. linked approval state for the issue when approval objects exist
+4. freeform comments only as optional supporting narration, never as the source of truth
+
+If a lower-priority source conflicts with a higher-priority source, the higher-priority source wins.
+
+Examples:
+
+- if a comment says the work is blocked but `issues.status` and `missionControl.workflowState` do not, Telegram must not report it as blocked
+- if a comment suggests a handoff but no structured owner or handoff change exists, Telegram must not report a real handoff
+- if an approval comment exists but the linked approval is already resolved, Telegram must use the approval object status rather than stale commentary
+
+#### 10.3 Automatic emergence triggers
+
+In summary mode, Telegram should surface an issue automatically only when a durable operator-visible change happened. The minimum automatic triggers for this slice are:
+
+- a new tracked issue is created and enters a real mission-control lane with durable ownership, blocker, handoff, review, or escalation state
+- `issue.handoff_updated` records a real structured handoff or handoff resolution
+- `issue.updated` changes `ownerAgentId`, `assigneeAgentId`, `missionControl.nextStep`, `missionControl.workflowState`, `missionControl.blocker`, or `missionControl.needsHumanAttention` in a way that changes operator expectations
+- `issues.status` changes to `blocked`, `in_review`, `done`, or `cancelled`
+- a linked approval for the issue enters or leaves `pending`
+
+Automatic emergence should be keyed to structured state changes, not to every comment, run event, or transcript append.
+
+#### 10.4 Blocker, approval, and milestone rules
+
+Telegram must collapse the existing Paperclip state into a small set of operator-meaningful summary behaviors.
+
+**Blocker emergence**
+
+Surface the issue as blocked when either of the following is true:
+
+- `issues.status=blocked`
+- `missionControl.workflowState.kind` is `waiting_on_human` or `blocked_on_upstream`
+
+The Telegram summary should include the smallest structured explanation available in this order:
+
+1. `missionControl.blocker`
+2. `missionControl.handoff.unblockCondition`
+3. `missionControl.nextStep` if it explicitly describes the unblock action
+
+Do not invent blocker text from unrelated comments.
+
+**Approval emergence**
+
+Surface the issue as needing approval or review when any of the following is true:
+
+- `issues.status=in_review`
+- `missionControl.needsHumanAttention=true`
+- a linked approval object for the issue is `pending`
+
+Approval emergence must reuse current Paperclip semantics rather than inventing a Telegram-specific approval type:
+
+- when a linked approval object exists, summarize the existing approval `type` and `status`
+- when no linked approval object exists, treat `in_review` or `needsHumanAttention` as the approval/review signal and summarize the current `nextStep`
+
+**Milestone emergence**
+
+Surface the issue as a milestone when a durable status change indicates a meaningful operator checkpoint:
+
+- `status=in_review`: deliverable ready for review or approval
+- `status=done`: requested slice completed
+- `status=cancelled`: planned slice explicitly stopped
+
+A plain comment, tool run, or internal progress note is not a milestone.
+
+#### 10.5 Chatter suppression by default
+
+Summary mode is the default Telegram behavior.
+
+In summary mode, Telegram must suppress low-level chatter by default, including:
+
+- generic `issue.comment_added` narration that does not change durable state
+- run-linked transcript comments
+- tool chatter and local execution notes
+- repeated restatements of the same owner, blocker, or next step
+- approval discussion that does not change approval state
+
+Comments may be included only as short supporting context when they accompany a real structured state change and improve operator comprehension. The comment is supplementary; the structured state remains authoritative.
+
+#### 10.6 Summary mode versus transparent mode
+
+This slice defines two Telegram presentation modes over the same underlying Paperclip state:
+
+- `summary mode` is the default and should emit only the compact structured story the operator needs right now
+- `transparent mode` is opt-in and may append selected recent narration beneath the same structured summary headline
+
+Mode differences:
+
+| Mode | Required behavior | Must stay suppressed |
+|---|---|---|
+| `summary` | show current owner, current state, next meaningful action, and any blocker/approval/handoff that changed operator expectations | transcript chatter, tool-by-tool narration, repeated comments that do not change durable state |
+| `transparent` | keep the same structured summary first, then optionally append recent supporting comments or narration for traceability | it still must not infer durable state from comments or mirror every low-level run event |
+
+Transparent mode increases context, not authority. Both modes must tell the same durable truth because both are derived from the same structured Paperclip state.
+
+#### 10.7 Implementation boundary for this slice
+
+This slice defines Telegram summary semantics only.
+
+It does not require a specific Telegram bot, webhook, polling loop, delivery schedule, or channel format in this pass. Later implementation may project these rules through any existing integration surface, but the resulting summaries must preserve the precedence, emergence, and suppression rules in sections 10.1 through 10.6.
+
+### 11. Operational Consequences
 
 This spec intentionally aligns with the current operator queue and summary surfaces:
 
@@ -423,9 +548,15 @@ This spec intentionally aligns with the current operator queue and summary surfa
 - escalation lanes depend on `missionControl.needsHumanAttention`
 - recent handoffs depend on `issue.handoff_updated` activity derived from structured handoff writes
 
-If an OpenClaw actor leaves a state-changing message only in chat, the operator queue will miss it. That is considered incorrect integration behavior for any case covered by sections 5 through 9.
+This same structured-state discipline now also feeds Telegram summary behavior:
 
-### 11. Acceptance Criteria For This Slice
+- blocker/approval/milestone emergence depends on existing issue status plus mission-control metadata
+- Telegram summary mode suppresses chat noise by default and only trusts structured state
+- transparent mode may add context, but it does not change durable mission-control truth
+
+If an OpenClaw actor leaves a state-changing message only in chat, the operator queue and later Telegram summaries will miss it. That is considered incorrect integration behavior for any case covered by sections 5 through 10.
+
+### 12. Acceptance Criteria For This Slice
 
 This slice is complete when later implementation follows these rules:
 
@@ -437,4 +568,7 @@ This slice is complete when later implementation follows these rules:
 - blocked, waiting, handoff, and resume context is expressed through existing mission-control metadata without replacing `issues.status`
 - structured handoffs are required whenever ownership, expected-next-actor, or blocker/waiting responsibility changes, or durable state would otherwise be inferred from chat
 - chat-only messages are allowed only for non-durable discussion, clarification, or progress narration with no ownership/state/next-actor change
+- Telegram-visible summaries are derived from existing structured issue state, activity summaries, and linked approvals rather than transcript archaeology
+- automatic Telegram emergence is limited to durable state changes such as handoffs, blocker/review/escalation changes, milestone status changes, and linked approval state changes
+- summary mode suppresses low-level chatter by default, while transparent mode adds optional narration without changing the underlying structured truth
 - no additional mission-control task or dashboard model is introduced to support this integration
