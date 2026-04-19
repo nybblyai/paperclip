@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.ts";
 
 const mockIssueService = vi.hoisted(() => ({
@@ -25,6 +26,11 @@ const mockAgentService = vi.hoisted(() => ({
     ambiguous: false,
     agent: { id: raw },
   })),
+}));
+const mockBoardAuthService = vi.hoisted(() => ({
+  findBoardApiKeyByToken: vi.fn(async () => null),
+  resolveBoardAccess: vi.fn(),
+  touchBoardApiKey: vi.fn(),
 }));
 
 vi.mock("../services/index.js", () => ({
@@ -64,6 +70,10 @@ vi.mock("../services/index.js", () => ({
   workProductService: () => ({}),
 }));
 
+vi.mock("../services/board-auth.js", () => ({
+  boardAuthService: () => mockBoardAuthService,
+}));
+
 async function createApp(actor: Record<string, unknown> = {
   type: "board",
   userId: "local-board",
@@ -81,6 +91,76 @@ async function createApp(actor: Record<string, unknown> = {
     (req as any).actor = actor;
     next();
   });
+  app.use("/api", issueRoutes({} as any, {} as any));
+  app.use(errorHandler);
+  return app;
+}
+
+function createSelectChain(rows: unknown[]) {
+  return {
+    from() {
+      return {
+        where() {
+          return Promise.resolve(rows);
+        },
+      };
+    },
+  };
+}
+
+function createAuthenticatedAgentDb(input: {
+  token: string;
+  keyId?: string;
+  agentId: string;
+  companyId: string;
+}) {
+  const select = vi
+    .fn()
+    .mockImplementationOnce(() =>
+      createSelectChain([
+        {
+          id: input.keyId ?? "agent-key-1",
+          agentId: input.agentId,
+          companyId: input.companyId,
+          keyHash: createHash("sha256").update(input.token).digest("hex"),
+          revokedAt: null,
+        },
+      ]))
+    .mockImplementationOnce(() =>
+      createSelectChain([
+        {
+          id: input.agentId,
+          companyId: input.companyId,
+          status: "active",
+        },
+      ]));
+
+  const update = vi.fn(() => ({
+    set: vi.fn(() => ({
+      where: vi.fn().mockResolvedValue(undefined),
+    })),
+  }));
+
+  return { select, update } as any;
+}
+
+async function createAuthenticatedAgentApp(input: {
+  token: string;
+  agentId: string;
+  companyId: string;
+}) {
+  const [{ issueRoutes }, { errorHandler }, { actorMiddleware }] = await Promise.all([
+    vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
+    vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
+    vi.importActual<typeof import("../middleware/auth.js")>("../middleware/auth.js"),
+  ]);
+  const app = express();
+  app.use(express.json());
+  app.use(
+    actorMiddleware(createAuthenticatedAgentDb(input), {
+      deploymentMode: "authenticated",
+    }),
+  );
   app.use("/api", issueRoutes({} as any, {} as any));
   app.use(errorHandler);
   return app;
@@ -120,6 +200,9 @@ describe("issue activity event routes", () => {
       ambiguous: false,
       agent: { id: raw },
     }));
+    mockBoardAuthService.findBoardApiKeyByToken.mockResolvedValue(null);
+    mockBoardAuthService.resolveBoardAccess.mockReset();
+    mockBoardAuthService.touchBoardApiKey.mockReset();
   });
 
   it("logs blocker activity with added and removed issue summaries", async () => {
@@ -420,6 +503,108 @@ describe("issue activity event routes", () => {
             missionControl: existingIssue.missionControl,
           },
         }),
+      }),
+    );
+  });
+
+  it("records an agent-authenticated needs-human-attention escalation through the issue update route", async () => {
+    const mainAgentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const apiToken = "pcp_agent_token_needs_human";
+    const runId = "run-main-needs-human-1";
+    const existingIssue = {
+      ...makeIssue(),
+      ownerAgentId: mainAgentId,
+      assigneeAgentId: mainAgentId,
+      missionControl: {
+        collaboratorAgentIds: [],
+        needsHumanAttention: false,
+        nextStep: "Keep implementation moving without operator help.",
+      },
+    };
+    const updatedIssue = {
+      ...existingIssue,
+      missionControl: {
+        collaboratorAgentIds: [],
+        needsHumanAttention: true,
+        nextStep: "Operator review needed before continuing the implementation slice.",
+      },
+      updatedAt: new Date("2026-04-19T13:00:00.000Z"),
+    };
+
+    mockIssueService.getById.mockResolvedValue(existingIssue);
+    mockIssueService.update.mockResolvedValue(updatedIssue);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-needs-human-1",
+      issueId: existingIssue.id,
+      companyId: existingIssue.companyId,
+      body: "Escalating for operator review before continuing the tracked work.",
+    });
+
+    const res = await request(
+      await createAuthenticatedAgentApp({
+        token: apiToken,
+        agentId: mainAgentId,
+        companyId: existingIssue.companyId,
+      }),
+    )
+      .patch(`/api/issues/${existingIssue.id}`)
+      .set("Authorization", `Bearer ${apiToken}`)
+      .set("X-Paperclip-Run-Id", runId)
+      .send({
+        missionControl: {
+          collaboratorAgentIds: [],
+          needsHumanAttention: true,
+          nextStep: "Operator review needed before continuing the implementation slice.",
+        },
+        comment: "Escalating for operator review before continuing the tracked work.",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      existingIssue.id,
+      expect.objectContaining({
+        actorAgentId: mainAgentId,
+        actorUserId: null,
+        missionControl: {
+          collaboratorAgentIds: [],
+          needsHumanAttention: true,
+          nextStep: "Operator review needed before continuing the implementation slice.",
+        },
+      }),
+    );
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      existingIssue.id,
+      "Escalating for operator review before continuing the tracked work.",
+      expect.objectContaining({
+        agentId: mainAgentId,
+        runId,
+        userId: undefined,
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        actorType: "agent",
+        actorId: mainAgentId,
+        agentId: mainAgentId,
+        runId,
+        entityId: existingIssue.id,
+        details: expect.objectContaining({
+          source: "comment",
+          identifier: existingIssue.identifier,
+          missionControl: updatedIssue.missionControl,
+          _previous: expect.objectContaining({
+            missionControl: existingIssue.missionControl,
+          }),
+        }),
+      }),
+    );
+    expect(mockLogActivity).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.handoff_updated",
+        entityId: existingIssue.id,
       }),
     );
   });
