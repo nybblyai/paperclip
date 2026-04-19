@@ -334,15 +334,38 @@ function resolvePaperclipApiUrlOverride(value: unknown): string | null {
 }
 
 const DEFAULT_CLAIMED_API_KEY_PATH = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
+const DEFAULT_OPENCLAW_BRIDGE_DIR = "~/.local/share/paperclip-openclaw-bridge";
 const OPENCLAW_WORKSPACE_HOME_PREFIX = "~/.openclaw/workspace/";
 const OPENCLAW_WORKSPACE_ABSOLUTE_PREFIX = "/home/openclaw/.openclaw/workspace/";
+const OPENCLAW_BRIDGE_HOME_PREFIX = `${DEFAULT_OPENCLAW_BRIDGE_DIR}/`;
+const OPENCLAW_BRIDGE_ABSOLUTE_PREFIX = "/home/openclaw/.local/share/paperclip-openclaw-bridge/";
 
-function resolveClaimedApiKeyPath(value: unknown): string {
-  return nonEmpty(value) ?? DEFAULT_CLAIMED_API_KEY_PATH;
+function resolveOpenClawBridgeDir(value: unknown): string {
+  return nonEmpty(value) ?? nonEmpty(process.env.PAPERCLIP_OPENCLAW_BRIDGE_DIR) ?? DEFAULT_OPENCLAW_BRIDGE_DIR;
+}
+
+export function resolveClaimedApiKeyPath(input: {
+  claimedApiKeyPath: unknown;
+  bridgeDir?: unknown;
+  companyId: string;
+  agentId: string;
+}): string {
+  const explicitClaimedApiKeyPath =
+    nonEmpty(input.claimedApiKeyPath) ?? nonEmpty(process.env.PAPERCLIP_CLAIMED_API_KEY_PATH);
+  if (explicitClaimedApiKeyPath) return explicitClaimedApiKeyPath;
+
+  const bridgeDir = resolveOpenClawBridgeDir(input.bridgeDir);
+  return path.posix.join(bridgeDir, "claimed-keys", input.companyId, `${input.agentId}.json`);
 }
 
 function resolveClaimedApiKeyWritePath(displayPath: string): string {
   const raw = displayPath.trim();
+  if (raw === DEFAULT_OPENCLAW_BRIDGE_DIR) {
+    return OPENCLAW_BRIDGE_ABSOLUTE_PREFIX.replace(/\/$/, "");
+  }
+  if (raw.startsWith(OPENCLAW_BRIDGE_HOME_PREFIX)) {
+    return path.join(OPENCLAW_BRIDGE_ABSOLUTE_PREFIX, raw.slice(OPENCLAW_BRIDGE_HOME_PREFIX.length));
+  }
   if (raw.startsWith(OPENCLAW_WORKSPACE_HOME_PREFIX)) {
     return path.join(OPENCLAW_WORKSPACE_ABSOLUTE_PREFIX, raw.slice(OPENCLAW_WORKSPACE_HOME_PREFIX.length));
   }
@@ -1161,7 +1184,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const wakePayload = buildWakePayload(ctx);
   const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
-  const claimedApiKeyPath = resolveClaimedApiKeyPath(ctx.config.claimedApiKeyPath);
+  const claimedApiKeyPath = resolveClaimedApiKeyPath({
+    claimedApiKeyPath: ctx.config.claimedApiKeyPath,
+    bridgeDir: ctx.config.bridgeDir,
+    companyId: ctx.agent.companyId,
+    agentId: ctx.agent.id,
+  });
   let claimedApiKeyProvisioned = false;
   if (ctx.authToken) {
     const materialized = await materializeClaimedApiKey({

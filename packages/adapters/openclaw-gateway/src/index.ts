@@ -36,7 +36,8 @@ Request behavior fields:
 - waitTimeoutMs (number, optional): agent.wait timeout override (default timeoutSec * 1000)
 - autoPairOnFirstConnect (boolean, optional): on first "pairing required", attempt device.pair.list/device.pair.approve via shared auth, then retry once (default true)
 - paperclipApiUrl (string, optional): absolute Paperclip base URL advertised in wake text
-- claimedApiKeyPath (string, optional): path to the claimed API key JSON file read by the agent at wake time (default ~/.openclaw/workspace/paperclip-claimed-api-key.json)
+- bridgeDir (string, optional): shared Paperclip/OpenClaw bridge directory used to derive claimed-key artifact paths (default ~/.local/share/paperclip-openclaw-bridge, or PAPERCLIP_OPENCLAW_BRIDGE_DIR when set)
+- claimedApiKeyPath (string, optional): explicit path to the claimed API key JSON file read by the agent at wake time (overrides bridgeDir and PAPERCLIP_CLAIMED_API_KEY_PATH)
 
 Session routing fields:
 - sessionKeyStrategy (string, optional): issue (default), fixed, or run

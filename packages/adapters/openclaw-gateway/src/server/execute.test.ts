@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveSessionKey } from "./execute.js";
+import { resolveClaimedApiKeyPath, resolveSessionKey } from "./execute.js";
 
 describe("resolveSessionKey", () => {
   it("prefixes run-scoped session keys with the configured agent", () => {
@@ -48,5 +48,39 @@ describe("resolveSessionKey", () => {
         issueId: null,
       }),
     ).toBe("agent:meridian:paperclip");
+  });
+});
+
+describe("resolveClaimedApiKeyPath", () => {
+  it("derives a bridge-directory claimed-key path by default", () => {
+    expect(
+      resolveClaimedApiKeyPath({
+        claimedApiKeyPath: null,
+        companyId: "company-1",
+        agentId: "agent-1",
+      }),
+    ).toBe("~/.local/share/paperclip-openclaw-bridge/claimed-keys/company-1/agent-1.json");
+  });
+
+  it("prefers an explicit claimed-key path over the bridge directory", () => {
+    expect(
+      resolveClaimedApiKeyPath({
+        claimedApiKeyPath: "~/custom/paperclip-key.json",
+        bridgeDir: "~/ignored-bridge",
+        companyId: "company-1",
+        agentId: "agent-1",
+      }),
+    ).toBe("~/custom/paperclip-key.json");
+  });
+
+  it("derives the claimed-key path from a configured bridge directory", () => {
+    expect(
+      resolveClaimedApiKeyPath({
+        claimedApiKeyPath: null,
+        bridgeDir: "/srv/paperclip-bridge",
+        companyId: "company-1",
+        agentId: "agent-1",
+      }),
+    ).toBe("/srv/paperclip-bridge/claimed-keys/company-1/agent-1.json");
   });
 });
