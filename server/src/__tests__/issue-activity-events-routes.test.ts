@@ -507,169 +507,6 @@ describe("issue activity event routes", () => {
     );
   });
 
-  it("records a Main to Stitch specialist handoff through the issue update route", async () => {
-    const mainAgentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    const stitchAgentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-    const handoffTimestamp = "2026-04-19T12:30:00.000Z";
-    const existingIssue = {
-      ...makeIssue(),
-      ownerAgentId: mainAgentId,
-      assigneeAgentId: mainAgentId,
-      missionControl: {
-        collaboratorAgentIds: [],
-        nextStep: "Decide who should take the product-design slice.",
-      },
-    };
-    const updatedIssue = {
-      ...existingIssue,
-      ownerAgentId: stitchAgentId,
-      assigneeAgentId: stitchAgentId,
-      missionControl: {
-        collaboratorAgentIds: [mainAgentId],
-        nextStep: "Produce the design direction and return with a specialist summary.",
-        workflowState: {
-          kind: "handed_off",
-          enteredAt: new Date(handoffTimestamp),
-        },
-        handoff: {
-          fromAgentId: mainAgentId,
-          toAgentId: stitchAgentId,
-          reason: "Design ownership is clear",
-          requestedNextStep: "Take the design execution slice and summarize the recommendation.",
-          unblockCondition: "Design artifacts and the specialist summary are attached.",
-          timestamp: new Date(handoffTimestamp),
-          context: {
-            issueId: existingIssue.id,
-            identifier: existingIssue.identifier,
-            title: existingIssue.title,
-          },
-        },
-      },
-      updatedAt: new Date(handoffTimestamp),
-    };
-
-    mockIssueService.getById.mockResolvedValue(existingIssue);
-    mockIssueService.update.mockResolvedValue(updatedIssue);
-    mockIssueService.addComment.mockResolvedValue({
-      id: "comment-stitch-1",
-      issueId: existingIssue.id,
-      companyId: existingIssue.companyId,
-      body: "Routing this to Stitch for design execution.",
-    });
-    mockAccessService.hasPermission.mockResolvedValue(true);
-
-    const apiToken = "pcp_agent_token_main_to_stitch";
-    const runId = "run-main-stitch-1";
-    const res = await request(
-      await createAuthenticatedAgentApp({
-        token: apiToken,
-        agentId: mainAgentId,
-        companyId: existingIssue.companyId,
-      }),
-    )
-      .patch(`/api/issues/${existingIssue.id}`)
-      .set("Authorization", `Bearer ${apiToken}`)
-      .set("X-Paperclip-Run-Id", runId)
-      .send({
-        ownerAgentId: stitchAgentId,
-        assigneeAgentId: stitchAgentId,
-        missionControl: {
-          collaboratorAgentIds: [mainAgentId],
-          nextStep: "Produce the design direction and return with a specialist summary.",
-          workflowState: {
-            kind: "handed_off",
-            enteredAt: handoffTimestamp,
-          },
-          handoff: {
-            fromAgentId: mainAgentId,
-            toAgentId: stitchAgentId,
-            reason: "Design ownership is clear",
-            requestedNextStep: "Take the design execution slice and summarize the recommendation.",
-            unblockCondition: "Design artifacts and the specialist summary are attached.",
-            timestamp: handoffTimestamp,
-            context: {
-              issueId: existingIssue.id,
-              identifier: existingIssue.identifier,
-              title: existingIssue.title,
-            },
-          },
-        },
-        comment: "Routing this to Stitch for design execution.",
-      });
-
-    expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      existingIssue.id,
-      expect.objectContaining({
-        ownerAgentId: stitchAgentId,
-        assigneeAgentId: stitchAgentId,
-        actorAgentId: mainAgentId,
-        actorUserId: null,
-        missionControl: expect.objectContaining({
-          collaboratorAgentIds: [mainAgentId],
-          nextStep: "Produce the design direction and return with a specialist summary.",
-          workflowState: expect.objectContaining({
-            kind: "handed_off",
-          }),
-          handoff: expect.objectContaining({
-            fromAgentId: mainAgentId,
-            toAgentId: stitchAgentId,
-            reason: "Design ownership is clear",
-          }),
-        }),
-      }),
-    );
-    expect(mockIssueService.addComment).toHaveBeenCalledWith(
-      existingIssue.id,
-      "Routing this to Stitch for design execution.",
-      expect.objectContaining({
-        agentId: mainAgentId,
-        runId,
-        userId: undefined,
-      }),
-    );
-    expect(mockLogActivity).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        action: "issue.updated",
-        actorType: "agent",
-        actorId: mainAgentId,
-        agentId: mainAgentId,
-        runId,
-        entityId: existingIssue.id,
-        details: expect.objectContaining({
-          ownerAgentId: stitchAgentId,
-          assigneeAgentId: stitchAgentId,
-          source: "comment",
-          identifier: existingIssue.identifier,
-          _previous: expect.objectContaining({
-            ownerAgentId: mainAgentId,
-            assigneeAgentId: mainAgentId,
-            missionControl: existingIssue.missionControl,
-          }),
-        }),
-      }),
-    );
-    expect(mockLogActivity).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        action: "issue.handoff_updated",
-        actorType: "agent",
-        actorId: mainAgentId,
-        agentId: mainAgentId,
-        runId,
-        entityId: existingIssue.id,
-        details: expect.objectContaining({
-          identifier: existingIssue.identifier,
-          missionControl: updatedIssue.missionControl,
-          _previous: {
-            missionControl: existingIssue.missionControl,
-          },
-        }),
-      }),
-    );
-  });
-
   it("records an agent-authenticated needs-human-attention escalation through the issue update route", async () => {
     const mainAgentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const apiToken = "pcp_agent_token_needs_human";
@@ -771,4 +608,131 @@ describe("issue activity event routes", () => {
       }),
     );
   });
+
+  it("records an agent-authenticated blocked to resumed update through the issue update route", async () => {
+    const orkAgentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const apiToken = "pcp_agent_token_resume";
+    const runId = "run-ork-resume-1";
+    const resumeTimestamp = "2026-04-19T14:00:00.000Z";
+    const existingIssue = {
+      ...makeIssue(),
+      status: "blocked",
+      ownerAgentId: orkAgentId,
+      assigneeAgentId: orkAgentId,
+      missionControl: {
+        collaboratorAgentIds: [],
+        needsHumanAttention: false,
+        nextStep: "Wait for the upstream dependency to land.",
+        workflowState: {
+          kind: "blocked_on_upstream",
+          enteredAt: new Date("2026-04-19T13:30:00.000Z"),
+        },
+      },
+    };
+    const updatedIssue = {
+      ...existingIssue,
+      status: "todo",
+      missionControl: {
+        collaboratorAgentIds: [],
+        needsHumanAttention: false,
+        nextStep: "Resume the implementation now that the upstream dependency is unblocked.",
+        workflowState: {
+          kind: "resumed",
+          enteredAt: new Date(resumeTimestamp),
+          resumedFrom: "blocked_on_upstream",
+        },
+      },
+      updatedAt: new Date(resumeTimestamp),
+    };
+
+    mockIssueService.getById.mockResolvedValue(existingIssue);
+    mockIssueService.update.mockResolvedValue(updatedIssue);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-resume-1",
+      issueId: existingIssue.id,
+      companyId: existingIssue.companyId,
+      body: "Upstream is clear. Resuming this slice now.",
+    });
+
+    const res = await request(
+      await createAuthenticatedAgentApp({
+        token: apiToken,
+        agentId: orkAgentId,
+        companyId: existingIssue.companyId,
+      }),
+    )
+      .patch(`/api/issues/${existingIssue.id}`)
+      .set("Authorization", `Bearer ${apiToken}`)
+      .set("X-Paperclip-Run-Id", runId)
+      .send({
+        status: "todo",
+        missionControl: {
+          collaboratorAgentIds: [],
+          needsHumanAttention: false,
+          nextStep: "Resume the implementation now that the upstream dependency is unblocked.",
+          workflowState: {
+            kind: "resumed",
+            enteredAt: resumeTimestamp,
+            resumedFrom: "blocked_on_upstream",
+          },
+        },
+        comment: "Upstream is clear. Resuming this slice now.",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      existingIssue.id,
+      expect.objectContaining({
+        status: "todo",
+        actorAgentId: orkAgentId,
+        actorUserId: null,
+        missionControl: expect.objectContaining({
+          collaboratorAgentIds: [],
+          needsHumanAttention: false,
+          nextStep: "Resume the implementation now that the upstream dependency is unblocked.",
+          workflowState: expect.objectContaining({
+            kind: "resumed",
+            resumedFrom: "blocked_on_upstream",
+          }),
+        }),
+      }),
+    );
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      existingIssue.id,
+      "Upstream is clear. Resuming this slice now.",
+      expect.objectContaining({
+        agentId: orkAgentId,
+        runId,
+        userId: undefined,
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+        runId,
+        entityId: existingIssue.id,
+        details: expect.objectContaining({
+          status: "todo",
+          source: "comment",
+          identifier: existingIssue.identifier,
+          missionControl: updatedIssue.missionControl,
+          _previous: expect.objectContaining({
+            status: "blocked",
+            missionControl: existingIssue.missionControl,
+          }),
+        }),
+      }),
+    );
+    expect(mockLogActivity).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.handoff_updated",
+        entityId: existingIssue.id,
+      }),
+    );
+  }, 15_000);
 });

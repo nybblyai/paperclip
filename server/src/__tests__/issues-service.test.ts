@@ -756,6 +756,134 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     });
   });
 
+  it("keeps blocked to resumed workflow recovery as the latest meaningful activity after follow-up comments", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const orkAgentId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: orkAgentId,
+      companyId,
+      name: "Ork",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Resume the blocked integration slice",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: orkAgentId,
+      invocationSource: "manual",
+      status: "running",
+      contextSnapshot: { issueId },
+    });
+
+    await db.insert(activityLog).values([
+      {
+        companyId,
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+        runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-19T13:30:00.000Z"),
+        details: {
+          status: "blocked",
+          missionControl: {
+            workflowState: {
+              kind: "blocked_on_upstream",
+              enteredAt: "2026-04-19T13:30:00.000Z",
+            },
+          },
+          _previous: {
+            status: "todo",
+            missionControl: {
+              workflowState: null,
+            },
+          },
+        },
+      },
+      {
+        companyId,
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+        runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-19T14:00:00.000Z"),
+        details: {
+          status: "todo",
+          missionControl: {
+            workflowState: {
+              kind: "resumed",
+              enteredAt: "2026-04-19T14:00:00.000Z",
+              resumedFrom: "blocked_on_upstream",
+            },
+          },
+          _previous: {
+            status: "blocked",
+            missionControl: {
+              workflowState: {
+                kind: "blocked_on_upstream",
+                enteredAt: "2026-04-19T13:30:00.000Z",
+              },
+            },
+          },
+        },
+      },
+      {
+        companyId,
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+        runId,
+        action: "issue.comment_added",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-19T14:05:00.000Z"),
+        details: {
+          commentId: randomUUID(),
+          bodySnippet: "Resumed work is in progress again.",
+        },
+      },
+    ]);
+
+    const [result] = await svc.list(companyId, {});
+
+    expect(result?.latestActivitySummary).toMatchObject({
+      text: "Marked resumed from blocked on upstream",
+      action: "issue.updated",
+      actorType: "agent",
+      actorId: orkAgentId,
+      agentId: orkAgentId,
+    });
+    expect(result?.latestHandoffSummary).toBeNull();
+  });
+
   it("derives compact latest handoff summaries from structured handoff activity", async () => {
     const companyId = randomUUID();
     const issueId = randomUUID();
