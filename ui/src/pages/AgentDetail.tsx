@@ -3104,6 +3104,21 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
   const sessionChanged = run.sessionIdBefore && run.sessionIdAfter && run.sessionIdBefore !== run.sessionIdAfter;
   const sessionId = run.sessionIdAfter || run.sessionIdBefore;
   const hasNonZeroExit = run.exitCode !== null && run.exitCode !== 0;
+  const resultJson = asRecord(run.resultJson);
+  const openClawRunId = adapterType === "openclaw_gateway"
+    ? asNonEmptyString(run.externalRunId)
+      ?? asNonEmptyString(resultJson?.externalRunId)
+      ?? asNonEmptyString(resultJson?.runId)
+    : null;
+  const openClawSessionKey = adapterType === "openclaw_gateway"
+    ? asNonEmptyString(resultJson?.sessionKey)
+      ?? asNonEmptyString(run.sessionIdAfter)
+      ?? asNonEmptyString(run.sessionIdBefore)
+    : null;
+  const openClawAgentId = adapterType === "openclaw_gateway"
+    ? asNonEmptyString(resultJson?.agentId)
+      ?? asNonEmptyString(asRecord(adapterConfig)?.agentId)
+    : null;
 
   return (
     <div className="space-y-4 min-w-0">
@@ -3282,6 +3297,30 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
             </div>
           )}
         </div>
+
+        {(openClawRunId || openClawSessionKey || openClawAgentId) && (
+          <div className="border-t border-border bg-muted/20 px-4 py-3 space-y-2">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">OpenClaw Execution</div>
+            {openClawAgentId && (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-muted-foreground w-24">Agent</span>
+                <CopyText text={openClawAgentId} className="font-mono" />
+              </div>
+            )}
+            {openClawRunId && (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-muted-foreground w-24">Run</span>
+                <CopyText text={openClawRunId} className="font-mono" />
+              </div>
+            )}
+            {openClawSessionKey && (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-muted-foreground w-24">Session</span>
+                <CopyText text={openClawSessionKey} className="font-mono" />
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Collapsible session row */}
         {hasSession && (
