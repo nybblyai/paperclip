@@ -80,6 +80,11 @@ if [[ -z "$BETTER_AUTH_SECRET" ]]; then
   BETTER_AUTH_SECRET="$(openssl rand -hex 32)"
 fi
 
+: "${PAPERCLIP_AGENT_JWT_SECRET:=}"
+if [[ -z "$PAPERCLIP_AGENT_JWT_SECRET" && -f "${HOME}/.paperclip/instances/default/.env" ]]; then
+  PAPERCLIP_AGENT_JWT_SECRET="$(grep -E '^PAPERCLIP_AGENT_JWT_SECRET=' "${HOME}/.paperclip/instances/default/.env" | tail -n1 | cut -d= -f2-)"
+fi
+
 : "${OPENAI_API_KEY:=}"
 if [[ -z "$OPENAI_API_KEY" && -f "${HOME}/.codex/auth.json" ]]; then
   OPENAI_API_KEY="$(python3 - <<'PY'
@@ -105,6 +110,7 @@ PAPERCLIP_PUBLIC_URL=${PAPERCLIP_PUBLIC_URL}
 PAPERCLIP_DATA_DIR=${PAPERCLIP_DATA_DIR}
 POSTGRES_DATA_DIR=${POSTGRES_DATA_DIR}
 BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+PAPERCLIP_AGENT_JWT_SECRET=${PAPERCLIP_AGENT_JWT_SECRET}
 OPENAI_API_KEY=${OPENAI_API_KEY}
 EOF
 chmod 600 "$ENV_FILE"
