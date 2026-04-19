@@ -507,6 +507,169 @@ describe("issue activity event routes", () => {
     );
   });
 
+  it("records a Main to Stitch specialist handoff through the issue update route", async () => {
+    const mainAgentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const stitchAgentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const handoffTimestamp = "2026-04-19T12:30:00.000Z";
+    const existingIssue = {
+      ...makeIssue(),
+      ownerAgentId: mainAgentId,
+      assigneeAgentId: mainAgentId,
+      missionControl: {
+        collaboratorAgentIds: [],
+        nextStep: "Decide who should take the product-design slice.",
+      },
+    };
+    const updatedIssue = {
+      ...existingIssue,
+      ownerAgentId: stitchAgentId,
+      assigneeAgentId: stitchAgentId,
+      missionControl: {
+        collaboratorAgentIds: [mainAgentId],
+        nextStep: "Produce the design direction and return with a specialist summary.",
+        workflowState: {
+          kind: "handed_off",
+          enteredAt: new Date(handoffTimestamp),
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: stitchAgentId,
+          reason: "Design ownership is clear",
+          requestedNextStep: "Take the design execution slice and summarize the recommendation.",
+          unblockCondition: "Design artifacts and the specialist summary are attached.",
+          timestamp: new Date(handoffTimestamp),
+          context: {
+            issueId: existingIssue.id,
+            identifier: existingIssue.identifier,
+            title: existingIssue.title,
+          },
+        },
+      },
+      updatedAt: new Date(handoffTimestamp),
+    };
+
+    mockIssueService.getById.mockResolvedValue(existingIssue);
+    mockIssueService.update.mockResolvedValue(updatedIssue);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-stitch-1",
+      issueId: existingIssue.id,
+      companyId: existingIssue.companyId,
+      body: "Routing this to Stitch for design execution.",
+    });
+    mockAccessService.hasPermission.mockResolvedValue(true);
+
+    const apiToken = "pcp_agent_token_main_to_stitch";
+    const runId = "run-main-stitch-1";
+    const res = await request(
+      await createAuthenticatedAgentApp({
+        token: apiToken,
+        agentId: mainAgentId,
+        companyId: existingIssue.companyId,
+      }),
+    )
+      .patch(`/api/issues/${existingIssue.id}`)
+      .set("Authorization", `Bearer ${apiToken}`)
+      .set("X-Paperclip-Run-Id", runId)
+      .send({
+        ownerAgentId: stitchAgentId,
+        assigneeAgentId: stitchAgentId,
+        missionControl: {
+          collaboratorAgentIds: [mainAgentId],
+          nextStep: "Produce the design direction and return with a specialist summary.",
+          workflowState: {
+            kind: "handed_off",
+            enteredAt: handoffTimestamp,
+          },
+          handoff: {
+            fromAgentId: mainAgentId,
+            toAgentId: stitchAgentId,
+            reason: "Design ownership is clear",
+            requestedNextStep: "Take the design execution slice and summarize the recommendation.",
+            unblockCondition: "Design artifacts and the specialist summary are attached.",
+            timestamp: handoffTimestamp,
+            context: {
+              issueId: existingIssue.id,
+              identifier: existingIssue.identifier,
+              title: existingIssue.title,
+            },
+          },
+        },
+        comment: "Routing this to Stitch for design execution.",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      existingIssue.id,
+      expect.objectContaining({
+        ownerAgentId: stitchAgentId,
+        assigneeAgentId: stitchAgentId,
+        actorAgentId: mainAgentId,
+        actorUserId: null,
+        missionControl: expect.objectContaining({
+          collaboratorAgentIds: [mainAgentId],
+          nextStep: "Produce the design direction and return with a specialist summary.",
+          workflowState: expect.objectContaining({
+            kind: "handed_off",
+          }),
+          handoff: expect.objectContaining({
+            fromAgentId: mainAgentId,
+            toAgentId: stitchAgentId,
+            reason: "Design ownership is clear",
+          }),
+        }),
+      }),
+    );
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      existingIssue.id,
+      "Routing this to Stitch for design execution.",
+      expect.objectContaining({
+        agentId: mainAgentId,
+        runId,
+        userId: undefined,
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        actorType: "agent",
+        actorId: mainAgentId,
+        agentId: mainAgentId,
+        runId,
+        entityId: existingIssue.id,
+        details: expect.objectContaining({
+          ownerAgentId: stitchAgentId,
+          assigneeAgentId: stitchAgentId,
+          source: "comment",
+          identifier: existingIssue.identifier,
+          _previous: expect.objectContaining({
+            ownerAgentId: mainAgentId,
+            assigneeAgentId: mainAgentId,
+            missionControl: existingIssue.missionControl,
+          }),
+        }),
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.handoff_updated",
+        actorType: "agent",
+        actorId: mainAgentId,
+        agentId: mainAgentId,
+        runId,
+        entityId: existingIssue.id,
+        details: expect.objectContaining({
+          identifier: existingIssue.identifier,
+          missionControl: updatedIssue.missionControl,
+          _previous: {
+            missionControl: existingIssue.missionControl,
+          },
+        }),
+      }),
+    );
+  });
+
   it("records an agent-authenticated needs-human-attention escalation through the issue update route", async () => {
     const mainAgentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const apiToken = "pcp_agent_token_needs_human";
