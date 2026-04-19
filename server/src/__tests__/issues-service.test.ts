@@ -23,6 +23,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { issueService } from "../services/issues.ts";
+import { buildTelegramMissionControlSummary } from "../services/telegram-mission-control-summary.js";
 import { buildProjectMentionHref } from "@paperclipai/shared";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -1449,6 +1450,234 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
         agentId: personalOsAgentId,
       },
     ]);
+  });
+
+  it("proves a tracked Main to Ork dry run stays operator-readable without rereading transcript chatter", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const mainAgentId = randomUUID();
+    const orkAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: mainAgentId,
+        companyId,
+        name: "Main",
+        role: "coordinator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: orkAgentId,
+        companyId,
+        name: "Ork",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Validate mission-control dry-run usability for tracked engineering work",
+      status: "todo",
+      priority: "high",
+      ownerAgentId: mainAgentId,
+      assigneeAgentId: mainAgentId,
+      missionControl: {
+        collaboratorAgentIds: [],
+        nextStep: "Main decides which specialist owns the next implementation slice.",
+      },
+    });
+
+    await svc.updateWithActivity(issueId, {
+      ownerAgentId: orkAgentId,
+      assigneeAgentId: orkAgentId,
+      missionControl: {
+        collaboratorAgentIds: [mainAgentId],
+        nextStep: "Implement the dry-run validation and report targeted verification.",
+        workflowState: {
+          kind: "handed_off",
+          enteredAt: "2026-04-19T10:00:00.000Z",
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering execution is now clear",
+          requestedNextStep: "Take ownership of the implementation slice and report back with evidence.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          timestamp: "2026-04-19T10:00:00.000Z",
+        },
+      },
+    }, {
+      actorType: "agent",
+      actorId: mainAgentId,
+      agentId: mainAgentId,
+    });
+
+    await svc.addComment(
+      issueId,
+      "Routing this to Ork for the engineering dry run.",
+      { agentId: mainAgentId },
+    );
+
+    await svc.updateWithActivity(issueId, {
+      status: "blocked",
+      missionControl: {
+        collaboratorAgentIds: [mainAgentId],
+        nextStep: "Wait for the upstream API fix, then resume verification and report the result.",
+        blocker: "External API credentials are still failing in the target environment.",
+        workflowState: {
+          kind: "blocked_on_upstream",
+          enteredAt: "2026-04-19T10:30:00.000Z",
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering execution is now clear",
+          requestedNextStep: "Take ownership of the implementation slice and report back with evidence.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          timestamp: "2026-04-19T10:00:00.000Z",
+        },
+      },
+    }, {
+      actorType: "agent",
+      actorId: orkAgentId,
+      agentId: orkAgentId,
+    });
+
+    await svc.addComment(
+      issueId,
+      "Still blocked on the upstream API even though the owner and next step are already structured.",
+      { agentId: orkAgentId },
+    );
+
+    await svc.updateWithActivity(issueId, {
+      status: "todo",
+      missionControl: {
+        collaboratorAgentIds: [mainAgentId],
+        nextStep: "Resume the dry-run verification, capture the result, and report back to the operator.",
+        blocker: null,
+        workflowState: {
+          kind: "resumed",
+          resumedFrom: "blocked_on_upstream",
+          enteredAt: "2026-04-19T11:00:00.000Z",
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering execution is now clear",
+          requestedNextStep: "Take ownership of the implementation slice and report back with evidence.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          timestamp: "2026-04-19T10:00:00.000Z",
+        },
+      },
+    }, {
+      actorType: "agent",
+      actorId: orkAgentId,
+      agentId: orkAgentId,
+    });
+
+    await svc.addComment(
+      issueId,
+      "Verification is resumed; transcript chatter should not replace the structured mission-control summary.",
+      { agentId: orkAgentId },
+    );
+
+    const [listedIssue] = await svc.list(companyId, {});
+
+    expect(listedIssue).toMatchObject({
+      id: issueId,
+      ownerAgentId: orkAgentId,
+      assigneeAgentId: orkAgentId,
+      status: "todo",
+      missionControl: {
+        nextStep: "Resume the dry-run verification, capture the result, and report back to the operator.",
+        blocker: null,
+        workflowState: {
+          kind: "resumed",
+          resumedFrom: "blocked_on_upstream",
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering execution is now clear",
+          requestedNextStep: "Take ownership of the implementation slice and report back with evidence.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          context: {
+            issueId,
+            title: "Validate mission-control dry-run usability for tracked engineering work",
+          },
+        },
+      },
+      latestActivitySummary: {
+        text: "Marked resumed from blocked on upstream",
+        action: "issue.updated",
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+      },
+      latestHandoffSummary: {
+        text: "Created handoff",
+        action: "issue.handoff_updated",
+        actorType: "agent",
+        actorId: mainAgentId,
+        agentId: mainAgentId,
+      },
+    });
+
+    const comments = await svc.listComments(issueId);
+    const summary = buildTelegramMissionControlSummary({
+      issue: listedIssue!,
+      comments,
+      mode: "summary",
+      agentLabels: {
+        [mainAgentId]: "Main",
+        [orkAgentId]: "Ork",
+      },
+    });
+    const transparent = buildTelegramMissionControlSummary({
+      issue: listedIssue!,
+      comments,
+      mode: "transparent",
+      agentLabels: {
+        [mainAgentId]: "Main",
+        [orkAgentId]: "Ork",
+      },
+      maxTransparentComments: 2,
+    });
+
+    expect(summary).toEqual({
+      lines: [
+        "Owner: Ork",
+        "State: resumed",
+        "Next: Resume the dry-run verification, capture the result, and report back to the operator.",
+        "Handoff: Main -> Ork",
+        "Latest: Marked resumed from blocked on upstream",
+      ],
+      supportingNarration: [],
+    });
+    expect(transparent).toEqual({
+      lines: summary.lines,
+      supportingNarration: [
+        "Still blocked on the upstream API even though the owner and next step are already structured.",
+        "Verification is resumed; transcript chatter should not replace the structured mission-control summary.",
+      ],
+    });
   });
 
   it("trims list payload fields that can grow large on issue index routes", async () => {
