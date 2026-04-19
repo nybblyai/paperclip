@@ -15,15 +15,21 @@ const mockIssueService = vi.hoisted(() => ({
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockAccessService = vi.hoisted(() => ({
+  canUser: vi.fn(async () => false),
+  hasPermission: vi.fn(async () => false),
+}));
+const mockAgentService = vi.hoisted(() => ({
+  getById: vi.fn(async () => null),
+  resolveByReference: vi.fn(async (_companyId: string, raw: string) => ({
+    ambiguous: false,
+    agent: { id: raw },
+  })),
+}));
 
 vi.mock("../services/index.js", () => ({
-  accessService: () => ({
-    canUser: vi.fn(async () => false),
-    hasPermission: vi.fn(async () => false),
-  }),
-  agentService: () => ({
-    getById: vi.fn(async () => null),
-  }),
+  accessService: () => mockAccessService,
+  agentService: () => mockAgentService,
   documentService: () => ({}),
   executionWorkspaceService: () => ({}),
   feedbackService: () => ({
@@ -58,7 +64,13 @@ vi.mock("../services/index.js", () => ({
   workProductService: () => ({}),
 }));
 
-async function createApp() {
+async function createApp(actor: Record<string, unknown> = {
+  type: "board",
+  userId: "local-board",
+  companyIds: ["company-1"],
+  source: "local_implicit",
+  isInstanceAdmin: false,
+}) {
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -66,13 +78,7 @@ async function createApp() {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = actor;
     next();
   });
   app.use("/api", issueRoutes({} as any, {} as any));
@@ -107,6 +113,13 @@ describe("issue activity event routes", () => {
     mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [] });
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAccessService.hasPermission.mockResolvedValue(false);
+    mockAgentService.getById.mockResolvedValue(null);
+    mockAgentService.resolveByReference.mockImplementation(async (_companyId: string, raw: string) => ({
+      ambiguous: false,
+      agent: { id: raw },
+    }));
   });
 
   it("logs blocker activity with added and removed issue summaries", async () => {
@@ -250,5 +263,164 @@ describe("issue activity event routes", () => {
         }),
       );
     });
+  });
+
+  it("records a Main to Ork tracked handoff through the issue update route", async () => {
+    const mainAgentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const orkAgentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const handoffTimestamp = "2026-04-19T12:00:00.000Z";
+    const existingIssue = {
+      ...makeIssue(),
+      ownerAgentId: mainAgentId,
+      assigneeAgentId: mainAgentId,
+      missionControl: {
+        collaboratorAgentIds: [],
+        nextStep: "Decide who should take the implementation slice.",
+      },
+    };
+    const updatedIssue = {
+      ...existingIssue,
+      ownerAgentId: orkAgentId,
+      assigneeAgentId: orkAgentId,
+      missionControl: {
+        collaboratorAgentIds: [mainAgentId],
+        nextStep: "Implement the tracked handoff validation and report targeted verification.",
+        workflowState: {
+          kind: "handed_off",
+          enteredAt: new Date(handoffTimestamp),
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering ownership is clear",
+          requestedNextStep: "Take the implementation slice and return with verification evidence.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          timestamp: new Date(handoffTimestamp),
+          context: {
+            issueId: existingIssue.id,
+            identifier: existingIssue.identifier,
+            title: existingIssue.title,
+          },
+        },
+      },
+      updatedAt: new Date(handoffTimestamp),
+    };
+
+    mockIssueService.getById.mockResolvedValue(existingIssue);
+    mockIssueService.update.mockResolvedValue(updatedIssue);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-3",
+      issueId: existingIssue.id,
+      companyId: existingIssue.companyId,
+      body: "Routing this to Ork for engineering execution.",
+    });
+    mockAccessService.hasPermission.mockResolvedValue(true);
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: mainAgentId,
+      companyId: "company-1",
+      runId: "run-main-1",
+      source: "api_key",
+    }))
+      .patch(`/api/issues/${existingIssue.id}`)
+      .send({
+        ownerAgentId: orkAgentId,
+        assigneeAgentId: orkAgentId,
+        missionControl: {
+          collaboratorAgentIds: [mainAgentId],
+          nextStep: "Implement the tracked handoff validation and report targeted verification.",
+          workflowState: {
+            kind: "handed_off",
+            enteredAt: handoffTimestamp,
+          },
+          handoff: {
+            fromAgentId: mainAgentId,
+            toAgentId: orkAgentId,
+            reason: "Engineering ownership is clear",
+            requestedNextStep: "Take the implementation slice and return with verification evidence.",
+            unblockCondition: "Patch and targeted verification are complete.",
+            timestamp: handoffTimestamp,
+            context: {
+              issueId: existingIssue.id,
+              identifier: existingIssue.identifier,
+              title: existingIssue.title,
+            },
+          },
+        },
+        comment: "Routing this to Ork for engineering execution.",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      existingIssue.id,
+      expect.objectContaining({
+        ownerAgentId: orkAgentId,
+        assigneeAgentId: orkAgentId,
+        actorAgentId: mainAgentId,
+        actorUserId: null,
+        missionControl: expect.objectContaining({
+          collaboratorAgentIds: [mainAgentId],
+          nextStep: "Implement the tracked handoff validation and report targeted verification.",
+          workflowState: expect.objectContaining({
+            kind: "handed_off",
+          }),
+          handoff: expect.objectContaining({
+            fromAgentId: mainAgentId,
+            toAgentId: orkAgentId,
+            reason: "Engineering ownership is clear",
+          }),
+        }),
+      }),
+    );
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      existingIssue.id,
+      "Routing this to Ork for engineering execution.",
+      expect.objectContaining({
+        agentId: mainAgentId,
+        runId: "run-main-1",
+        userId: undefined,
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        actorType: "agent",
+        actorId: mainAgentId,
+        agentId: mainAgentId,
+        runId: "run-main-1",
+        entityId: existingIssue.id,
+        details: expect.objectContaining({
+          ownerAgentId: orkAgentId,
+          assigneeAgentId: orkAgentId,
+          source: "comment",
+          identifier: existingIssue.identifier,
+          _previous: expect.objectContaining({
+            ownerAgentId: mainAgentId,
+            assigneeAgentId: mainAgentId,
+            missionControl: existingIssue.missionControl,
+          }),
+        }),
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.handoff_updated",
+        actorType: "agent",
+        actorId: mainAgentId,
+        agentId: mainAgentId,
+        runId: "run-main-1",
+        entityId: existingIssue.id,
+        details: expect.objectContaining({
+          identifier: existingIssue.identifier,
+          missionControl: updatedIssue.missionControl,
+          _previous: {
+            missionControl: existingIssue.missionControl,
+          },
+        }),
+      }),
+    );
   });
 });
