@@ -372,9 +372,9 @@ async function materializeClaimedApiKey(params: {
         null,
         2,
       ) + "\n",
-      { mode: 0o600 },
+      { mode: 0o644 },
     );
-    await fs.chmod(writePath, 0o600);
+    await fs.chmod(writePath, 0o644);
     return { ok: true, writePath };
   } catch (error) {
     return {
