@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import type { BillingType, ExecutionWorkspace, ExecutionWorkspaceConfig } from "@paperclipai/shared";
+import { isUuidLike, type BillingType, type ExecutionWorkspace, type ExecutionWorkspaceConfig } from "@paperclipai/shared";
 import {
   agents,
   agentRuntimeState,
@@ -2261,6 +2261,8 @@ export function heartbeatService(db: Db) {
   }
 
   async function clearDetachedRunWarning(runId: string) {
+    if (!isUuidLike(runId)) return null;
+
     const updated = await db
       .update(heartbeatRuns)
       .set({

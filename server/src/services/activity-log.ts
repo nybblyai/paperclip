@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, heartbeatRuns } from "@paperclipai/db";
-import { PLUGIN_EVENT_TYPES, type PluginEventType } from "@paperclipai/shared";
+import { isUuidLike, PLUGIN_EVENT_TYPES, type PluginEventType } from "@paperclipai/shared";
 import type { PluginEvent } from "@paperclipai/plugin-sdk";
 import { publishLiveEvent } from "./live-events.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
@@ -45,6 +45,19 @@ export async function logActivity(db: Db, input: LogActivityInput) {
     : null;
 
   let persistedRunId = input.runId ?? null;
+  if (persistedRunId && !isUuidLike(persistedRunId)) {
+    logger.warn(
+      {
+        companyId: input.companyId,
+        action: input.action,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        runId: persistedRunId,
+      },
+      "activity log run_id is not a UUID; storing activity without run reference",
+    );
+    persistedRunId = null;
+  }
   if (persistedRunId) {
     const heartbeatRun = await db
       .select({ id: heartbeatRuns.id })
