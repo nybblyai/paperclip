@@ -1210,6 +1210,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const disableDeviceAuth = parseBoolean(ctx.config.disableDeviceAuth, false);
 
   const wakePayload = buildWakePayload(ctx);
+  const acceptDeliveryOnWaitTimeout = parseBoolean(ctx.config.acceptDeliveryOnWaitTimeout, true);
   const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
   const claimedApiKeyPath = resolveClaimedApiKeyPath({
     claimedApiKeyPath: ctx.config.claimedApiKeyPath,
@@ -1552,20 +1553,48 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
 
         if (waitStatus === "timeout") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: true,
-            errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
-            errorCode: "openclaw_gateway_wait_timeout",
-            resultJson: withExecutionRefs(waitPayload, {
-              externalRunId: acceptedRunId,
-              sessionKey,
-              agentId: configuredAgentId,
-            }),
-            sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
-            sessionDisplayId: sessionKey,
-          };
+          const treatTimeoutAsAcceptedDelivery =
+            acceptDeliveryOnWaitTimeout &&
+            acceptedStatus === "accepted" &&
+            (wakePayload.wakeReason ?? "").toLowerCase() !== "timer";
+
+          if (treatTimeoutAsAcceptedDelivery) {
+            latestResultPayload = withExecutionRefs(
+              {
+                ...(asRecord(acceptedPayload) ?? {}),
+                runId: acceptedRunId,
+                status: "accepted",
+                deliveryStatus: "accepted_timeout",
+                waitStatus: "timeout",
+                ...(nonEmpty(waitPayload?.error) ? { waitError: nonEmpty(waitPayload?.error) } : {}),
+              },
+              {
+                externalRunId: acceptedRunId,
+                sessionKey,
+                agentId: configuredAgentId,
+              },
+            );
+            await ctx.onLog(
+              "stdout",
+              `[openclaw-gateway] agent.wait timed out after ${waitTimeoutMs}ms, but delivery was already accepted for wakeReason=${wakePayload.wakeReason ?? "unknown"} runId=${acceptedRunId}; treating wake as delivered\n`,
+            );
+            waitStatus = "ok";
+          } else {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: true,
+              errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
+              errorCode: "openclaw_gateway_wait_timeout",
+              resultJson: withExecutionRefs(waitPayload, {
+                externalRunId: acceptedRunId,
+                sessionKey,
+                agentId: configuredAgentId,
+              }),
+              sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+              sessionDisplayId: sessionKey,
+            };
+          }
         }
 
         if (waitStatus === "error") {

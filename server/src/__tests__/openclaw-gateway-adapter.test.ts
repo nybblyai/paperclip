@@ -583,6 +583,91 @@ describe("openclaw gateway adapter execute", () => {
     }
   });
 
+  it("treats accepted non-timer wake wait timeouts as delivered", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: {
+        runId: "run-123",
+        status: "timeout",
+        error: "gateway timeout",
+      },
+    });
+    const logs: string[] = [];
+
+    try {
+      const result = await execute(
+        buildContext(
+          {
+            url: gateway.url,
+            headers: {
+              "x-openclaw-token": "gateway-token",
+            },
+            waitTimeoutMs: 2000,
+          },
+          {
+            onLog: async (_stream, chunk) => {
+              logs.push(chunk);
+            },
+          },
+        ),
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.timedOut).toBe(false);
+      expect(result.summary).toContain("chachacha");
+      expect(result.resultJson).toMatchObject({
+        runId: "run-123",
+        status: "accepted",
+        deliveryStatus: "accepted_timeout",
+        waitStatus: "timeout",
+        externalRunId: "run-123",
+        sessionKey: "paperclip:issue:issue-123",
+      });
+      expect(
+        logs.some((entry) => entry.includes("treating wake as delivered")),
+      ).toBe(true);
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("still fails timer wakes when agent.wait times out", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: {
+        runId: "run-123",
+        status: "timeout",
+        error: "gateway timeout",
+      },
+    });
+
+    try {
+      const result = await execute(
+        buildContext(
+          {
+            url: gateway.url,
+            headers: {
+              "x-openclaw-token": "gateway-token",
+            },
+            waitTimeoutMs: 2000,
+          },
+          {
+            context: {
+              taskId: "task-123",
+              issueId: "issue-123",
+              wakeReason: "timer",
+              issueIds: ["issue-123"],
+            },
+          },
+        ),
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.timedOut).toBe(true);
+      expect(result.errorCode).toBe("openclaw_gateway_wait_timeout");
+    } finally {
+      await gateway.close();
+    }
+  });
+
   it("auto-approves pairing once and retries the run", async () => {
     const gateway = await createMockGatewayServerWithPairing();
     const logs: string[] = [];
