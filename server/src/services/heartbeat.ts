@@ -1535,6 +1535,19 @@ export function heartbeatService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
+  async function getRequestedByActorForRun(runId: string) {
+    const run = await getRun(runId);
+    if (!run?.wakeupRequestId) return null;
+    return db
+      .select({
+        actorType: agentWakeupRequests.requestedByActorType,
+        actorId: agentWakeupRequests.requestedByActorId,
+      })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, run.wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function getRunLogAccess(runId: string) {
     return db
       .select(heartbeatRunLogAccessColumns)
@@ -5395,6 +5408,8 @@ export function heartbeatService(db: Db) {
         .limit(1);
       return run ?? null;
     },
+
+    getRequestedByActorForRun,
 
     getActiveRunForAgent: async (agentId: string) => {
       const [run] = await db

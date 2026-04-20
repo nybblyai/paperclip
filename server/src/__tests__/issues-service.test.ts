@@ -6,6 +6,7 @@ import {
   activityLog,
   agents,
   companies,
+  companyMemberships,
   createDb,
   executionWorkspaces,
   heartbeatRuns,
@@ -2472,6 +2473,120 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(followUp.executionWorkspaceSettings).toEqual({
       mode: "operator_branch",
     });
+  });
+});
+
+describeEmbeddedPostgres("issueService.create default assignee fallback", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-create-default-assignee-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+    await ensureIssueRelationsTable(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(issueRelations);
+    await db.delete(issueInboxArchives);
+    await db.delete(activityLog);
+    await db.delete(heartbeatRuns);
+    await db.delete(companyMemberships);
+    await db.delete(issues);
+    await db.delete(executionWorkspaces);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("applies the provided default assignee user when no explicit assignee was supplied", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const creatorAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: creatorAgentId,
+      companyId,
+      name: "Creator",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: "user-1",
+      status: "active",
+    });
+
+    const created = await svc.create(companyId, {
+      title: "Child issue",
+      defaultAssigneeUserId: "user-1",
+      createdByAgentId: creatorAgentId,
+    });
+
+    expect(created.assigneeAgentId).toBeNull();
+    expect(created.assigneeUserId).toBe("user-1");
+  });
+
+  it("does not override an explicit assignee with the default user fallback", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "Assignee",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const creatorAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: creatorAgentId,
+      companyId,
+      name: "Creator",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const created = await svc.create(companyId, {
+      title: "Child issue",
+      assigneeAgentId,
+      defaultAssigneeUserId: "user-1",
+      createdByAgentId: creatorAgentId,
+    });
+
+    expect(created.assigneeAgentId).toBe(assigneeAgentId);
+    expect(created.assigneeUserId).toBeNull();
   });
 });
 

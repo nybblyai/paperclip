@@ -152,6 +152,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   blockedByIssueIds?: string[];
   inheritExecutionWorkspaceFromIssueId?: string | null;
+  defaultAssigneeUserId?: string | null;
 };
 type IssueRelationSummaryMap = {
   blockedBy: IssueRelationIssueSummary[];
@@ -1823,40 +1824,44 @@ export function issueService(db: Db) {
         labelIds: inputLabelIds,
         blockedByIssueIds,
         inheritExecutionWorkspaceFromIssueId,
+        defaultAssigneeUserId,
         ...issueData
       } = data;
+      if (!issueData.assigneeAgentId && !issueData.assigneeUserId && defaultAssigneeUserId) {
+        issueData.assigneeUserId = defaultAssigneeUserId;
+      }
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
       }
-      if (data.assigneeAgentId && data.assigneeUserId) {
+      if (issueData.assigneeAgentId && issueData.assigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
       }
-      if (data.assigneeAgentId) {
-        await assertAssignableAgent(companyId, data.assigneeAgentId);
+      if (issueData.assigneeAgentId) {
+        await assertAssignableAgent(companyId, issueData.assigneeAgentId);
       }
-      if (data.ownerAgentId) {
-        await assertAssignableAgent(companyId, data.ownerAgentId);
+      if (issueData.ownerAgentId) {
+        await assertAssignableAgent(companyId, issueData.ownerAgentId);
       }
-      if (data.assigneeUserId) {
-        await assertAssignableUser(companyId, data.assigneeUserId);
+      if (issueData.assigneeUserId) {
+        await assertAssignableUser(companyId, issueData.assigneeUserId);
       }
-      const collaboratorAgentIds = Array.isArray(data.missionControl?.collaboratorAgentIds)
-        ? data.missionControl.collaboratorAgentIds
+      const collaboratorAgentIds = Array.isArray(issueData.missionControl?.collaboratorAgentIds)
+        ? issueData.missionControl.collaboratorAgentIds
         : [];
       for (const collaboratorAgentId of collaboratorAgentIds) {
         await assertAssignableAgent(companyId, collaboratorAgentId);
       }
-      const createHandoff = asRecord(data.missionControl?.handoff);
+      const createHandoff = asRecord(issueData.missionControl?.handoff);
       const handoffAgentIds = [createHandoff?.fromAgentId, createHandoff?.toAgentId].filter(
         (value): value is string => typeof value === "string" && value.length > 0,
       );
       for (const handoffAgentId of handoffAgentIds) {
         await assertAssignableAgent(companyId, handoffAgentId);
       }
-      if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
+      if (issueData.status === "in_progress" && !issueData.assigneeAgentId && !issueData.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {

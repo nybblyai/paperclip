@@ -282,6 +282,17 @@ function buildExecutionStageWakeup(input: {
   return null;
 }
 
+async function resolveDefaultSubtaskAssigneeUserId(input: {
+  actor: ReturnType<typeof getActorInfo>;
+  heartbeat: ReturnType<typeof heartbeatService>;
+  parentId: string | null | undefined;
+}) {
+  if (input.actor.actorType !== "agent" || !input.parentId || !input.actor.runId) return null;
+  const requestedBy = await input.heartbeat.getRequestedByActorForRun?.(input.actor.runId);
+  if (requestedBy?.actorType !== "user") return null;
+  return requestedBy.actorId ?? null;
+}
+
 export function issueRoutes(
   db: Db,
   storage: StorageService,
@@ -1335,17 +1346,24 @@ export function issueRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    if (req.body.assigneeAgentId || req.body.assigneeUserId) {
+
+    const actor = getActorInfo(req);
+    const defaultAssigneeUserId = await resolveDefaultSubtaskAssigneeUserId({
+      actor,
+      heartbeat,
+      parentId: req.body.parentId as string | null | undefined,
+    });
+    if (req.body.assigneeAgentId || req.body.assigneeUserId || defaultAssigneeUserId) {
       await assertCanAssignTasks(req, companyId);
     }
 
-    const actor = getActorInfo(req);
     const executionPolicy = normalizeIssueExecutionPolicy(req.body.executionPolicy);
     const issue = await svc.create(companyId, {
       ...req.body,
       executionPolicy,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      defaultAssigneeUserId,
     });
 
     await logActivity(db, {
