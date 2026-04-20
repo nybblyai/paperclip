@@ -1184,10 +1184,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 120)));
+  const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 1_800)));
   const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
   const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
-  const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
+  const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? 120_000;
 
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
   const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
@@ -1281,8 +1281,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     agentParams.agentId = configuredAgentId;
   }
 
-  if (typeof agentParams.timeout !== "number") {
-    agentParams.timeout = waitTimeoutMs;
+  if (typeof agentParams.timeout !== "number" && timeoutMs > 0) {
+    agentParams.timeout = timeoutMs;
   }
 
   if (ctx.onMeta) {
@@ -1323,7 +1323,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
   let autoPairAttempted = false;
-  let latestResultPayload: unknown = null;
+  let latestResultPayload: Record<string, unknown> | null = null;
 
   while (true) {
     const trackedRunIds = new Set<string>([ctx.runId]);
@@ -1507,89 +1507,112 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
 
       if (acceptedStatus !== "ok") {
-        const waitOutcome = await Promise.race([
-          client
-            .request<Record<string, unknown>>(
-          "agent.wait",
-          { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
-          { timeoutMs: waitTimeoutMs + connectTimeoutMs },
-            )
-            .then((payload) => ({ source: "wait" as const, payload }))
-            .catch((error) => ({ source: "wait-error" as const, error })),
-          observedTerminalState,
-        ]);
+        const waitStartedAt = Date.now();
 
-        if ("source" in waitOutcome && waitOutcome.source === "wait-error") {
-          throw waitOutcome.error;
-        }
-
-        const waitPayload =
-          "source" in waitOutcome && waitOutcome.source === "wait"
-            ? waitOutcome.payload
-            : {
-                runId: acceptedRunId,
-                status: waitOutcome.status,
-                ...(waitOutcome.error ? { error: waitOutcome.error } : {}),
-              };
-
-        latestResultPayload = withExecutionRefs(waitPayload, {
-          externalRunId: acceptedRunId,
-          sessionKey,
-          agentId: configuredAgentId,
-        });
-
-        let waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
-        if (waitStatus === "timeout") {
-          const lateTerminalState = await Promise.race([
+        while (true) {
+          const waitOutcome = await Promise.race([
+            client
+              .request<Record<string, unknown>>(
+                "agent.wait",
+                { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
+                { timeoutMs: waitTimeoutMs + connectTimeoutMs },
+              )
+              .then((payload) => ({ source: "wait" as const, payload }))
+              .catch((error) => ({ source: "wait-error" as const, error })),
             observedTerminalState,
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
           ]);
-          if (lateTerminalState) {
-            waitStatus = lateTerminalState.status;
-            latestResultPayload = withExecutionRefs({
-              runId: acceptedRunId,
-              status: lateTerminalState.status,
-              ...(lateTerminalState.error ? { error: lateTerminalState.error } : {}),
-            }, {
-              externalRunId: acceptedRunId,
-              sessionKey,
-              agentId: configuredAgentId,
-            });
-            await ctx.onLog(
-              "stdout",
-              `[openclaw-gateway] recovered terminal status from streamed lifecycle events after agent.wait timeout runId=${acceptedRunId} status=${lateTerminalState.status}\n`,
-            );
+
+          if ("source" in waitOutcome && waitOutcome.source === "wait-error") {
+            throw waitOutcome.error;
           }
-        }
 
-        if (waitStatus === "timeout") {
-          const treatTimeoutAsAcceptedDelivery =
-            acceptDeliveryOnWaitTimeout &&
-            acceptedStatus === "accepted" &&
-            (wakePayload.wakeReason ?? "").toLowerCase() !== "timer";
+          const waitPayload =
+            "source" in waitOutcome && waitOutcome.source === "wait"
+              ? waitOutcome.payload
+              : {
+                  runId: acceptedRunId,
+                  status: waitOutcome.status,
+                  ...(waitOutcome.error ? { error: waitOutcome.error } : {}),
+                };
 
-          if (treatTimeoutAsAcceptedDelivery) {
-            latestResultPayload = withExecutionRefs(
-              {
-                ...(asRecord(acceptedPayload) ?? {}),
-                runId: acceptedRunId,
-                status: "accepted",
-                deliveryStatus: "accepted_timeout",
-                waitStatus: "timeout",
-                ...(nonEmpty(waitPayload?.error) ? { waitError: nonEmpty(waitPayload?.error) } : {}),
-              },
-              {
-                externalRunId: acceptedRunId,
-                sessionKey,
-                agentId: configuredAgentId,
-              },
-            );
-            await ctx.onLog(
-              "stdout",
-              `[openclaw-gateway] agent.wait timed out after ${waitTimeoutMs}ms, but delivery was already accepted for wakeReason=${wakePayload.wakeReason ?? "unknown"} runId=${acceptedRunId}; treating wake as delivered\n`,
-            );
-            waitStatus = "ok";
-          } else {
+          latestResultPayload = withExecutionRefs(waitPayload, {
+            externalRunId: acceptedRunId,
+            sessionKey,
+            agentId: configuredAgentId,
+          });
+
+          let waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+          if (waitStatus === "timeout") {
+            const lateTerminalState = await Promise.race([
+              observedTerminalState,
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
+            ]);
+            if (lateTerminalState) {
+              waitStatus = lateTerminalState.status;
+              latestResultPayload = withExecutionRefs(
+                {
+                  runId: acceptedRunId,
+                  status: lateTerminalState.status,
+                  ...(lateTerminalState.error ? { error: lateTerminalState.error } : {}),
+                },
+                {
+                  externalRunId: acceptedRunId,
+                  sessionKey,
+                  agentId: configuredAgentId,
+                },
+              );
+              await ctx.onLog(
+                "stdout",
+                `[openclaw-gateway] recovered terminal status from streamed lifecycle events after agent.wait timeout runId=${acceptedRunId} status=${lateTerminalState.status}\n`,
+              );
+            }
+          }
+
+          if (waitStatus === "timeout") {
+            const treatTimeoutAsAcceptedDelivery =
+              acceptDeliveryOnWaitTimeout &&
+              acceptedStatus === "accepted" &&
+              (wakePayload.wakeReason ?? "").toLowerCase() !== "timer";
+
+            if (treatTimeoutAsAcceptedDelivery) {
+              const elapsedMs = Date.now() - waitStartedAt;
+              latestResultPayload = withExecutionRefs(
+                {
+                  ...(asRecord(acceptedPayload) ?? {}),
+                  runId: acceptedRunId,
+                  status: "accepted",
+                  deliveryStatus: "accepted_timeout",
+                  waitStatus: "timeout",
+                  elapsedWaitMs: elapsedMs,
+                  ...(nonEmpty(waitPayload?.error) ? { waitError: nonEmpty(waitPayload?.error) } : {}),
+                },
+                {
+                  externalRunId: acceptedRunId,
+                  sessionKey,
+                  agentId: configuredAgentId,
+                },
+              );
+
+              if (timeoutMs > 0 && elapsedMs >= timeoutMs) {
+                return {
+                  exitCode: 1,
+                  signal: null,
+                  timedOut: true,
+                  errorMessage: `OpenClaw gateway run timed out after ${elapsedMs}ms waiting for terminal completion`,
+                  errorCode: "openclaw_gateway_wait_timeout",
+                  resultJson: latestResultPayload,
+                  sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+                  sessionDisplayId: sessionKey,
+                };
+              }
+
+              await ctx.onLog(
+                "stdout",
+                `[openclaw-gateway] agent.wait timed out after ${waitTimeoutMs}ms, but delivery was already accepted for wakeReason=${wakePayload.wakeReason ?? "unknown"} runId=${acceptedRunId}; continuing to wait for terminal completion (elapsed=${elapsedMs}ms)\n`,
+              );
+              continue;
+            }
+
             return {
               exitCode: 1,
               signal: null,
@@ -1605,43 +1628,45 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               sessionDisplayId: sessionKey,
             };
           }
-        }
 
-        if (waitStatus === "error") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: false,
-            errorMessage:
-              nonEmpty(waitPayload?.error) ??
-              lifecycleError ??
-              "OpenClaw gateway run failed",
-            errorCode: "openclaw_gateway_wait_error",
-            resultJson: withExecutionRefs(waitPayload, {
-              externalRunId: acceptedRunId,
-              sessionKey,
-              agentId: configuredAgentId,
-            }),
-            sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
-            sessionDisplayId: sessionKey,
-          };
-        }
+          if (waitStatus === "error") {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage:
+                nonEmpty(waitPayload?.error) ??
+                lifecycleError ??
+                "OpenClaw gateway run failed",
+              errorCode: "openclaw_gateway_wait_error",
+              resultJson: withExecutionRefs(waitPayload, {
+                externalRunId: acceptedRunId,
+                sessionKey,
+                agentId: configuredAgentId,
+              }),
+              sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+              sessionDisplayId: sessionKey,
+            };
+          }
 
-        if (waitStatus && waitStatus !== "ok") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: false,
-            errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
-            errorCode: "openclaw_gateway_wait_status_unexpected",
-            resultJson: withExecutionRefs(waitPayload, {
-              externalRunId: acceptedRunId,
-              sessionKey,
-              agentId: configuredAgentId,
-            }),
-            sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
-            sessionDisplayId: sessionKey,
-          };
+          if (waitStatus && waitStatus !== "ok") {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
+              errorCode: "openclaw_gateway_wait_status_unexpected",
+              resultJson: withExecutionRefs(waitPayload, {
+                externalRunId: acceptedRunId,
+                sessionKey,
+                agentId: configuredAgentId,
+              }),
+              sessionParams: { sessionKey, ...(configuredAgentId ? { agentId: configuredAgentId } : {}) },
+              sessionDisplayId: sessionKey,
+            };
+          }
+
+          break;
         }
       }
 

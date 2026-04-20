@@ -41,11 +41,13 @@ function buildContext(
 
 async function createMockGatewayServer(options?: {
   waitPayload?: Record<string, unknown>;
+  waitPayloads?: Record<string, unknown>[];
 }) {
   const server = createServer();
   const wss = new WebSocketServer({ server });
 
   let agentPayload: Record<string, unknown> | null = null;
+  let waitCallCount = 0;
 
   wss.on("connection", (socket) => {
     socket.send(
@@ -136,17 +138,19 @@ async function createMockGatewayServer(options?: {
       }
 
       if (frame.method === "agent.wait") {
+        const payload = options?.waitPayloads?.[waitCallCount] ?? options?.waitPayload ?? {
+          runId: frame.params?.runId,
+          status: "ok",
+          startedAt: 1,
+          endedAt: 2,
+        };
+        waitCallCount += 1;
         socket.send(
           JSON.stringify({
             type: "res",
             id: frame.id,
             ok: true,
-            payload: options?.waitPayload ?? {
-              runId: frame.params?.runId,
-              status: "ok",
-              startedAt: 1,
-              endedAt: 2,
-            },
+            payload,
           }),
         );
       }
@@ -165,6 +169,7 @@ async function createMockGatewayServer(options?: {
   return {
     url: `ws://127.0.0.1:${address.port}`,
     getAgentPayload: () => agentPayload,
+    getWaitCallCount: () => waitCallCount,
     close: async () => {
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -586,13 +591,21 @@ describe("openclaw gateway adapter execute", () => {
     }
   });
 
-  it("treats accepted non-timer wake wait timeouts as delivered", async () => {
+  it("keeps waiting across accepted non-timer wait timeouts until terminal completion", async () => {
     const gateway = await createMockGatewayServer({
-      waitPayload: {
-        runId: "run-123",
-        status: "timeout",
-        error: "gateway timeout",
-      },
+      waitPayloads: [
+        {
+          runId: "run-123",
+          status: "timeout",
+          error: "gateway timeout",
+        },
+        {
+          runId: "run-123",
+          status: "ok",
+          startedAt: 1,
+          endedAt: 2,
+        },
+      ],
     });
     const logs: string[] = [];
 
@@ -605,6 +618,7 @@ describe("openclaw gateway adapter execute", () => {
               "x-openclaw-token": "gateway-token",
             },
             waitTimeoutMs: 2000,
+            timeoutSec: 10,
           },
           {
             onLog: async (_stream, chunk) => {
@@ -619,14 +633,13 @@ describe("openclaw gateway adapter execute", () => {
       expect(result.summary).toContain("chachacha");
       expect(result.resultJson).toMatchObject({
         runId: "run-123",
-        status: "accepted",
-        deliveryStatus: "accepted_timeout",
-        waitStatus: "timeout",
+        status: "ok",
         externalRunId: "run-123",
         sessionKey: "paperclip:issue:issue-123",
       });
+      expect(gateway.getWaitCallCount()).toBe(2);
       expect(
-        logs.some((entry) => entry.includes("treating wake as delivered")),
+        logs.some((entry) => entry.includes("continuing to wait for terminal completion")),
       ).toBe(true);
     } finally {
       await gateway.close();
