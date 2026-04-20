@@ -511,12 +511,15 @@ describe("openclaw gateway adapter execute", () => {
       );
       expect(String(payload?.message ?? "")).toContain("First comment");
       expect(String(payload?.message ?? "")).toContain("\"commentIds\":[\"comment-1\",\"comment-2\"]");
-      expect(payload?.paperclip).toMatchObject({
-        wake: {
-          latestCommentId: "comment-2",
-          commentIds: ["comment-1", "comment-2"],
-        },
-      });
+      expect(payload?.paperclip).toBeUndefined();
+      expect(
+        logs.some(
+          (entry) =>
+            entry.includes("standard paperclip payload") &&
+            entry.includes('"latestCommentId":"comment-2"') &&
+            entry.includes('"commentIds":["comment-1","comment-2"]'),
+        ),
+      ).toBe(true);
 
       expect(logs.some((entry) => entry.includes("[openclaw-gateway:event] run=run-123 stream=assistant"))).toBe(true);
     } finally {

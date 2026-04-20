@@ -2896,6 +2896,9 @@ export function heartbeatService(db: Db) {
         status: heartbeatRuns.status,
         error: heartbeatRuns.error,
         errorCode: heartbeatRuns.errorCode,
+        resultJson: heartbeatRuns.resultJson,
+        finishedAt: heartbeatRuns.finishedAt,
+        updatedAt: heartbeatRuns.updatedAt,
         contextSnapshot: heartbeatRuns.contextSnapshot,
       })
       .from(heartbeatRuns)
@@ -2939,6 +2942,22 @@ export function heartbeatService(db: Db) {
     ]);
 
     return Boolean(run || deferredWake);
+  }
+
+  function isAcceptedTimeoutContinuationGracePeriod(
+    latestRun: {
+      status: string;
+      resultJson?: Record<string, unknown> | null;
+      finishedAt?: Date | null;
+      updatedAt?: Date | null;
+    } | null,
+  ): boolean {
+    if (!latestRun || latestRun.status !== "succeeded") return false;
+    const resultJson = parseObject(latestRun.resultJson);
+    if (readNonEmptyString(resultJson.deliveryStatus) !== "accepted_timeout") return false;
+    const finishedAt = latestRun.finishedAt ?? latestRun.updatedAt;
+    if (!(finishedAt instanceof Date)) return false;
+    return Date.now() - finishedAt.getTime() < 5 * 60_000;
   }
 
   async function enqueueStrandedIssueRecovery(input: {
@@ -3068,6 +3087,11 @@ export function heartbeatService(db: Db) {
       const latestRun = await getLatestIssueRun(issue.companyId, issue.id);
       const latestContext = parseObject(latestRun?.contextSnapshot);
       const latestRetryReason = readNonEmptyString(latestContext.retryReason);
+
+      if (issue.status === "in_progress" && isAcceptedTimeoutContinuationGracePeriod(latestRun)) {
+        result.skipped += 1;
+        continue;
+      }
 
       if (issue.status === "todo") {
         if (!latestRun || latestRun.status === "succeeded") {

@@ -1270,7 +1270,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const agentParams: Record<string, unknown> = {
     ...payloadTemplate,
-    paperclip: standardPaperclipPayload,
     message,
     sessionKey,
     idempotencyKey: ctx.runId,
@@ -1303,6 +1302,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ctx.onLog(
     "stdout",
     `[openclaw-gateway] outbound payload (redacted): ${stringifyForLog(redactForLog(agentParams), 12_000)}\n`,
+  );
+  await ctx.onLog(
+    "stdout",
+    `[openclaw-gateway] standard paperclip payload (redacted): ${stringifyForLog(redactForLog(standardPaperclipPayload), 12_000)}\n`,
   );
   await ctx.onLog("stdout", `[openclaw-gateway] outbound header keys: ${outboundHeaderKeys.join(", ")}\n`);
   if (transportHint) {
