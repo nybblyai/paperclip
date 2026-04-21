@@ -79,6 +79,7 @@ describe("normalizeAgentDefaultsForJoin (openclaw_gateway)", () => {
       adapterType: "openclaw_gateway",
       defaultsPayload: {
         url: "ws://127.0.0.1:18789",
+        agentId: "main",
         headers: {
           "x-openclaw-token": "gateway-token-1234567890",
         },
@@ -91,6 +92,7 @@ describe("normalizeAgentDefaultsForJoin (openclaw_gateway)", () => {
     });
 
     expect(normalized.fatalErrors).toEqual([]);
+    expect(normalized.normalized?.agentId).toBe("main");
     expect(normalized.normalized?.disableDeviceAuth).toBe(false);
     expect(typeof normalized.normalized?.devicePrivateKeyPem).toBe("string");
     expect((normalized.normalized?.devicePrivateKeyPem as string).length).toBeGreaterThan(64);
@@ -115,5 +117,24 @@ describe("normalizeAgentDefaultsForJoin (openclaw_gateway)", () => {
     expect(normalized.fatalErrors).toEqual([]);
     expect(normalized.normalized?.disableDeviceAuth).toBe(true);
     expect(normalized.normalized?.devicePrivateKeyPem).toBeUndefined();
+  });
+
+  it("warns when direct-mapping agentId is omitted", () => {
+    const normalized = normalizeAgentDefaultsForJoin({
+      adapterType: "openclaw_gateway",
+      defaultsPayload: {
+        url: "ws://127.0.0.1:18789",
+        headers: {
+          "x-openclaw-token": "gateway-token-1234567890",
+        },
+        disableDeviceAuth: true,
+      },
+      deploymentMode: "authenticated",
+      deploymentExposure: "private",
+      bindHost: "127.0.0.1",
+      allowedHostnames: [],
+    });
+
+    expect(normalized.diagnostics.some((entry) => entry.code === "openclaw_gateway_agent_id_missing")).toBe(true);
   });
 });

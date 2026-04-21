@@ -1,0 +1,53 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: paperclip
+      POSTGRES_PASSWORD: paperclip
+      POSTGRES_DB: paperclip
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "127.0.0.1:${DB_PORT:?DB_PORT must be set}:5432"
+    volumes:
+      - type: bind
+        source: ${POSTGRES_DATA_DIR:?POSTGRES_DATA_DIR must be set}
+        target: /var/lib/postgresql/data
+    restart: unless-stopped
+
+  server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    network_mode: host
+    environment:
+      DATABASE_URL: postgres://paperclip:paperclip@127.0.0.1:${DB_PORT:?DB_PORT must be set}/paperclip
+      PORT: "${APP_PORT:?APP_PORT must be set}"
+      SERVE_UI: "true"
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
+      PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:?PAPERCLIP_PUBLIC_URL must be set}"
+      BETTER_AUTH_BASE_URL: "${PAPERCLIP_PUBLIC_URL:?PAPERCLIP_PUBLIC_URL must be set}"
+      BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
+      PAPERCLIP_AGENT_JWT_SECRET: "${PAPERCLIP_AGENT_JWT_SECRET:?PAPERCLIP_AGENT_JWT_SECRET must be set}"
+      PAPERCLIP_OPENCLAW_BRIDGE_DIR: "${PAPERCLIP_OPENCLAW_BRIDGE_DIR:-/home/openclaw/.local/share/paperclip-openclaw-bridge}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GIT_COMMIT_NAME: "${GIT_COMMIT_NAME:-}"
+      GIT_COMMIT_EMAIL: "${GIT_COMMIT_EMAIL:-}"
+      CODEX_HOME: /paperclip/.shared-codex
+      USER_UID: "${OPENCLAW_HOST_UID:-1000}"
+      USER_GID: "${OPENCLAW_HOST_GID:-1000}"
+    volumes:
+      - type: bind
+        source: ${PAPERCLIP_DATA_DIR:?PAPERCLIP_DATA_DIR must be set}
+        target: /paperclip
+      - type: bind
+        source: ${PAPERCLIP_OPENCLAW_BRIDGE_HOST_DIR:-/home/openclaw/.local/share/paperclip-openclaw-bridge}
+        target: ${PAPERCLIP_OPENCLAW_BRIDGE_DIR:-/home/openclaw/.local/share/paperclip-openclaw-bridge}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped

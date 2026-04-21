@@ -26,4 +26,12 @@ if [ "$changed" = "1" ]; then
     chown -R node:node /paperclip
 fi
 
+mkdir -p /paperclip/.codex /paperclip/instances/default/data/run-logs /paperclip/instances/default/logs
+chown -R node:node /paperclip/.codex /paperclip/instances/default/data /paperclip/instances/default/logs
+
+if [ -n "${GIT_COMMIT_NAME:-}" ] && [ -n "${GIT_COMMIT_EMAIL:-}" ]; then
+    gosu node git config --global user.name "$GIT_COMMIT_NAME"
+    gosu node git config --global user.email "$GIT_COMMIT_EMAIL"
+fi
+
 exec gosu node "$@"

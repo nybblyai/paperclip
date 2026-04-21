@@ -308,6 +308,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     runStatus: "failed" | "timed_out" | "cancelled" | "succeeded";
     retryReason?: "assignment_recovery" | "issue_continuation_needed" | null;
     assignToUser?: boolean;
+    resultJson?: Record<string, unknown> | null;
+    finishedAt?: Date;
+    updatedAt?: Date;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -367,9 +370,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           : input.retryReason ?? "issue_assigned",
         ...(input.retryReason ? { retryReason: input.retryReason } : {}),
       },
+      resultJson: input.resultJson ?? null,
       startedAt: now,
-      finishedAt: new Date("2026-03-19T00:05:00.000Z"),
-      updatedAt: new Date("2026-03-19T00:05:00.000Z"),
+      finishedAt: input.finishedAt ?? new Date("2026-03-19T00:05:00.000Z"),
+      updatedAt: input.updatedAt ?? input.finishedAt ?? new Date("2026-03-19T00:05:00.000Z"),
       errorCode: input.runStatus === "succeeded" ? null : "process_lost",
       error: input.runStatus === "succeeded" ? null : "run failed before issue advanced",
     });
@@ -535,6 +539,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(run?.error).toBeNull();
   });
 
+  it("ignores manual non-UUID run ids when activity is reported", async () => {
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.reportRunActivity("manual-main-1776636479")).resolves.toBeNull();
+  });
+
   it("tracks the first heartbeat with the agent role instead of adapter type", async () => {
     const { agentId, runId } = await seedRunFixture({
       agentStatus: "running",
@@ -649,6 +659,34 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("retried continuation");
     expect(comments[0]?.body).toContain("Latest retry failure: `process_lost` - run failed before issue advanced.");
+  });
+
+  it("does not requeue or block recent accepted-timeout continuation runs", async () => {
+    const { issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      resultJson: {
+        deliveryStatus: "accepted_timeout",
+        waitStatus: "timeout",
+      },
+      finishedAt: new Date(Date.now() - 60_000),
+      updatedAt: new Date(Date.now() - 60_000),
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.dispatchRequeued).toBe(0);
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.escalated).toBe(0);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_progress");
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(runs).toHaveLength(1);
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
   });
 
   it("does not reconcile user-assigned work through the agent stranded-work recovery path", async () => {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  ISSUE_MISSION_CONTROL_WORKFLOW_STATE_KINDS,
   ISSUE_EXECUTION_DECISION_OUTCOMES,
   ISSUE_EXECUTION_POLICY_MODES,
   ISSUE_EXECUTION_STAGE_TYPES,
@@ -113,6 +114,53 @@ export const issueExecutionStateSchema = z.object({
   lastDecisionOutcome: z.enum(ISSUE_EXECUTION_DECISION_OUTCOMES).nullable(),
 });
 
+const issueMissionControlWorkflowStateSchema = z.object({
+  kind: z.enum(ISSUE_MISSION_CONTROL_WORKFLOW_STATE_KINDS),
+  enteredAt: z.coerce.date(),
+  resumedFrom: z.enum(["waiting_on_human", "blocked_on_upstream", "handed_off"]).nullable().optional(),
+}).superRefine((value, ctx) => {
+  if (value.kind === "resumed") {
+    if (!value.resumedFrom) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Resumed workflow state requires resumedFrom",
+        path: ["resumedFrom"],
+      });
+    }
+    return;
+  }
+
+  if (value.resumedFrom) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Only resumed workflow state can set resumedFrom",
+      path: ["resumedFrom"],
+    });
+  }
+});
+
+export const issueMissionControlMetadataSchema = z.object({
+  sourceOfTruthPath: z.string().trim().min(1).max(500).nullable().optional(),
+  nextStep: z.string().trim().min(1).max(500).nullable().optional(),
+  blocker: z.string().trim().min(1).max(1000).nullable().optional(),
+  collaboratorAgentIds: z.array(z.string().uuid()).optional().default([]),
+  needsHumanAttention: z.boolean().optional(),
+  workflowState: issueMissionControlWorkflowStateSchema.nullable().optional(),
+  handoff: z.object({
+    fromAgentId: z.string().uuid().nullable().optional(),
+    toAgentId: z.string().uuid().nullable().optional(),
+    reason: z.string().trim().min(1).max(1000).nullable().optional(),
+    requestedNextStep: z.string().trim().min(1).max(1000).nullable().optional(),
+    unblockCondition: z.string().trim().min(1).max(1000).nullable().optional(),
+    timestamp: z.coerce.date(),
+    context: z.object({
+      issueId: z.string().uuid(),
+      identifier: z.string().trim().min(1).max(64).nullable(),
+      title: z.string().trim().min(1).max(500),
+    }),
+  }).nullable().optional(),
+});
+
 export const createIssueSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   projectWorkspaceId: z.string().uuid().optional().nullable(),
@@ -124,6 +172,7 @@ export const createIssueSchema = z.object({
   description: z.string().optional().nullable(),
   status: z.enum(ISSUE_STATUSES).optional().default("backlog"),
   priority: z.enum(ISSUE_PRIORITIES).optional().default("medium"),
+  ownerAgentId: z.string().uuid().optional().nullable(),
   assigneeAgentId: z.string().uuid().optional().nullable(),
   assigneeUserId: z.string().optional().nullable(),
   requestDepth: z.number().int().nonnegative().optional().default(0),
@@ -133,6 +182,7 @@ export const createIssueSchema = z.object({
   executionWorkspaceId: z.string().uuid().optional().nullable(),
   executionWorkspacePreference: z.enum(ISSUE_EXECUTION_WORKSPACE_PREFERENCES).optional().nullable(),
   executionWorkspaceSettings: issueExecutionWorkspaceSettingsSchema.optional().nullable(),
+  missionControl: issueMissionControlMetadataSchema.optional().nullable(),
   labelIds: z.array(z.string().uuid()).optional(),
 });
 
@@ -155,6 +205,8 @@ export const updateIssueSchema = createIssueSchema.partial().extend({
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;
 export type IssueExecutionWorkspaceSettings = z.infer<typeof issueExecutionWorkspaceSettingsSchema>;
+export type IssueMissionControlMetadata = z.infer<typeof issueMissionControlMetadataSchema>;
+export type IssueMissionControlWorkflowState = z.infer<typeof issueMissionControlWorkflowStateSchema>;
 
 export const checkoutIssueSchema = z.object({
   agentId: z.string().uuid(),

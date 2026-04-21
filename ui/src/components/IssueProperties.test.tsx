@@ -103,6 +103,15 @@ async function flush() {
   });
 }
 
+function setNativeInputValue(input: HTMLInputElement, value: string) {
+  const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  const previous = input.value;
+  valueSetter?.call(input, value);
+  const tracker = (input as HTMLInputElement & { _valueTracker?: { setValue: (v: string) => void } })._valueTracker;
+  tracker?.setValue(previous);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 function createIssue(overrides: Partial<Issue> = {}): Issue {
   return {
     id: "issue-1",
@@ -115,6 +124,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     description: null,
     status: "todo",
     priority: "medium",
+    ownerAgentId: null,
     assigneeAgentId: null,
     assigneeUserId: null,
     checkoutRunId: null,
@@ -131,6 +141,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     executionWorkspaceId: null,
     executionWorkspacePreference: null,
     executionWorkspaceSettings: null,
+    missionControl: null,
     startedAt: null,
     completedAt: null,
     cancelledAt: null,
@@ -456,6 +467,582 @@ describe("IssueProperties", () => {
 
     expect(container.textContent).not.toContain("Run review now");
     expect(container.textContent).not.toContain("Run approval now");
+
+    act(() => root.unmount());
+  });
+
+  it("edits mission control metadata fields", async () => {
+    const onUpdate = vi.fn();
+    const root = renderProperties(container, {
+      issue: createIssue({
+        missionControl: {
+          sourceOfTruthPath: "/tmp/spec.md",
+          nextStep: "Ship the dashboard",
+          blocker: null,
+          collaboratorAgentIds: [],
+          needsHumanAttention: false,
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const inputs = container.querySelectorAll("input");
+    const sourceInput = Array.from(inputs).find((input) => input.getAttribute("placeholder") === "Source-of-truth path");
+    expect(sourceInput).not.toBeUndefined();
+
+    await act(async () => {
+      sourceInput!.focus();
+      setNativeInputValue(sourceInput!, "/workspace/docs/spec.md");
+      sourceInput!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      sourceInput!.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      missionControl: {
+        sourceOfTruthPath: "/workspace/docs/spec.md",
+        nextStep: "Ship the dashboard",
+        blocker: null,
+        collaboratorAgentIds: [],
+        needsHumanAttention: false,
+      },
+    });
+
+    onUpdate.mockClear();
+    const checkbox = Array.from(inputs).find((input) => input.getAttribute("type") === "checkbox");
+    expect(checkbox).not.toBeUndefined();
+
+    await act(async () => {
+      checkbox!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      missionControl: {
+        sourceOfTruthPath: "/tmp/spec.md",
+        nextStep: "Ship the dashboard",
+        blocker: null,
+        collaboratorAgentIds: [],
+        needsHumanAttention: true,
+      },
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("allows editing mission-control workflow state", async () => {
+    const onUpdate = vi.fn();
+    const root = renderProperties(container, {
+      issue: createIssue({
+        missionControl: {
+          collaboratorAgentIds: [],
+          needsHumanAttention: false,
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const workflowTrigger = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("No workflow state"));
+    expect(workflowTrigger).not.toBeUndefined();
+
+    await act(async () => {
+      workflowTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const waitingOption = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Waiting on human"));
+    expect(waitingOption).not.toBeUndefined();
+
+    await act(async () => {
+      waitingOption!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      missionControl: expect.objectContaining({
+        collaboratorAgentIds: [],
+        needsHumanAttention: false,
+        workflowState: expect.objectContaining({
+          kind: "waiting_on_human",
+        }),
+      }),
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("offers explicit operator controls for waiting, blocked, and resume", async () => {
+    const onUpdate = vi.fn();
+    const root = renderProperties(container, {
+      issue: createIssue({
+        missionControl: {
+          collaboratorAgentIds: [],
+          needsHumanAttention: false,
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const markWaitingButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Mark waiting"));
+    expect(markWaitingButton).not.toBeUndefined();
+
+    await act(async () => {
+      markWaitingButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      missionControl: expect.objectContaining({
+        collaboratorAgentIds: [],
+        needsHumanAttention: true,
+        workflowState: expect.objectContaining({
+          kind: "waiting_on_human",
+        }),
+      }),
+    });
+
+    onUpdate.mockClear();
+
+    const markBlockedButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Mark blocked on upstream"));
+    expect(markBlockedButton).not.toBeUndefined();
+
+    await act(async () => {
+      markBlockedButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      status: "blocked",
+      missionControl: expect.objectContaining({
+        collaboratorAgentIds: [],
+        needsHumanAttention: false,
+        workflowState: expect.objectContaining({
+          kind: "blocked_on_upstream",
+        }),
+      }),
+    });
+
+    onUpdate.mockClear();
+    act(() => root.unmount());
+
+    const resumedRoot = renderProperties(container, {
+      issue: createIssue({
+        status: "blocked",
+        missionControl: {
+          collaboratorAgentIds: [],
+          needsHumanAttention: true,
+          workflowState: {
+            kind: "waiting_on_human",
+            enteredAt: new Date("2026-04-06T12:00:00.000Z"),
+            resumedFrom: null,
+          },
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const resumeButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Resume"));
+    expect(resumeButton).not.toBeUndefined();
+
+    await act(async () => {
+      resumeButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      missionControl: {
+        collaboratorAgentIds: [],
+        needsHumanAttention: true,
+        workflowState: expect.objectContaining({
+          kind: "resumed",
+          resumedFrom: "waiting_on_human",
+        }),
+      },
+    });
+
+    act(() => resumedRoot.unmount());
+  });
+
+  it("offers an escalate control that only raises needs-human-attention", async () => {
+    const onUpdate = vi.fn();
+    const root = renderProperties(container, {
+      issue: createIssue({
+        missionControl: {
+          collaboratorAgentIds: [],
+          needsHumanAttention: false,
+          workflowState: {
+            kind: "blocked_on_upstream",
+            enteredAt: new Date("2026-04-06T12:00:00.000Z"),
+            resumedFrom: null,
+          },
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const escalateButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Escalate"));
+    expect(escalateButton).not.toBeUndefined();
+
+    await act(async () => {
+      escalateButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      missionControl: {
+        collaboratorAgentIds: [],
+        needsHumanAttention: true,
+        workflowState: {
+          kind: "blocked_on_upstream",
+          enteredAt: new Date("2026-04-06T12:00:00.000Z"),
+          resumedFrom: null,
+        },
+      },
+    });
+
+    onUpdate.mockClear();
+    act(() => root.unmount());
+
+    const noWorkflowRoot = renderProperties(container, {
+      issue: createIssue({
+        missionControl: {
+          collaboratorAgentIds: [],
+          needsHumanAttention: false,
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const noWorkflowEscalateButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Escalate"));
+    expect(noWorkflowEscalateButton).not.toBeUndefined();
+
+    await act(async () => {
+      noWorkflowEscalateButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      missionControl: {
+        collaboratorAgentIds: [],
+        needsHumanAttention: true,
+      },
+    });
+
+    act(() => noWorkflowRoot.unmount());
+  });
+
+  it("offers a resolve handoff control that clears handoff state cleanly", async () => {
+    const onUpdate = vi.fn();
+    const root = renderProperties(container, {
+      issue: createIssue({
+        status: "todo",
+        missionControl: {
+          collaboratorAgentIds: [],
+          needsHumanAttention: true,
+          workflowState: {
+            kind: "handed_off",
+            enteredAt: new Date("2026-04-06T12:00:00.000Z"),
+            resumedFrom: null,
+          },
+          handoff: {
+            fromAgentId: "11111111-1111-4111-8111-111111111111",
+            toAgentId: "22222222-2222-4222-8222-222222222222",
+            reason: "Need Ork to finish the implementation",
+            requestedNextStep: "Finish the patch",
+            unblockCondition: "Patch merged",
+            timestamp: new Date("2026-04-06T12:00:00.000Z"),
+            context: {
+              issueId: "issue-1",
+              identifier: "PAP-1",
+              title: "Parent issue",
+            },
+          },
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const resolveHandoffButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Resolve handoff"));
+    expect(resolveHandoffButton).not.toBeUndefined();
+
+    await act(async () => {
+      resolveHandoffButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      missionControl: {
+        collaboratorAgentIds: [],
+        needsHumanAttention: true,
+        workflowState: null,
+        handoff: null,
+      },
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("allows setting an owner and collaborator agents", async () => {
+    const onUpdate = vi.fn();
+    mockAgentsApi.list.mockResolvedValue([
+      { id: "11111111-1111-4111-8111-111111111111", name: "Main" },
+      { id: "22222222-2222-4222-8222-222222222222", name: "Ork" },
+      { id: "33333333-3333-4333-8333-333333333333", name: "Stitch" },
+    ]);
+
+    const root = renderProperties(container, {
+      issue: createIssue({
+        missionControl: {
+          collaboratorAgentIds: [],
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const ownerTrigger = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("No owner"));
+    expect(ownerTrigger).not.toBeUndefined();
+
+    await act(async () => {
+      ownerTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const ownerOption = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Ork"));
+    expect(ownerOption).not.toBeUndefined();
+
+    await act(async () => {
+      ownerOption!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      ownerAgentId: "22222222-2222-4222-8222-222222222222",
+      missionControl: {
+        collaboratorAgentIds: [],
+      },
+    });
+
+    onUpdate.mockClear();
+    act(() => root.unmount());
+
+    const rerenderedRoot = renderProperties(container, {
+      issue: createIssue({
+        ownerAgentId: "22222222-2222-4222-8222-222222222222",
+        missionControl: {
+          collaboratorAgentIds: [],
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const collaboratorsTrigger = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("None"));
+    expect(collaboratorsTrigger).not.toBeUndefined();
+
+    await act(async () => {
+      collaboratorsTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const collaboratorOption = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Stitch"));
+    expect(collaboratorOption).not.toBeUndefined();
+
+    await act(async () => {
+      collaboratorOption!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      missionControl: {
+        collaboratorAgentIds: ["33333333-3333-4333-8333-333333333333"],
+      },
+    });
+
+    act(() => rerenderedRoot.unmount());
+  });
+
+  it("reassigns the owner to the active handoff target and removes duplicate collaborator ownership", async () => {
+    const onUpdate = vi.fn();
+    mockAgentsApi.list.mockResolvedValue([
+      { id: "11111111-1111-4111-8111-111111111111", name: "Main" },
+      { id: "22222222-2222-4222-8222-222222222222", name: "Ork" },
+      { id: "33333333-3333-4333-8333-333333333333", name: "Stitch" },
+    ]);
+
+    const root = renderProperties(container, {
+      issue: createIssue({
+        ownerAgentId: "11111111-1111-4111-8111-111111111111",
+        missionControl: {
+          collaboratorAgentIds: [
+            "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333",
+          ],
+          handoff: {
+            fromAgentId: "11111111-1111-4111-8111-111111111111",
+            toAgentId: "22222222-2222-4222-8222-222222222222",
+            reason: "Need Ork to take over implementation",
+            requestedNextStep: "Finish the patch",
+            unblockCondition: "Patch merged",
+            timestamp: new Date("2026-04-06T12:00:00.000Z"),
+            context: {
+              issueId: "issue-1",
+              identifier: "PAP-1",
+              title: "Parent issue",
+            },
+          },
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const reassignOwnerButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Reassign owner to Ork"));
+    expect(reassignOwnerButton).not.toBeUndefined();
+
+    await act(async () => {
+      reassignOwnerButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      ownerAgentId: "22222222-2222-4222-8222-222222222222",
+      missionControl: expect.objectContaining({
+        collaboratorAgentIds: ["33333333-3333-4333-8333-333333333333"],
+      }),
+    });
+
+    act(() => root.unmount());
+  });
+
+  it("shows compact activity and handoff summaries", async () => {
+    mockAgentsApi.list.mockResolvedValue([
+      { id: "22222222-2222-4222-8222-222222222222", name: "Ork" },
+      { id: "33333333-3333-4333-8333-333333333333", name: "Stitch" },
+    ]);
+
+    const root = renderProperties(container, {
+      issue: createIssue({
+        latestActivitySummary: {
+          kind: "activity",
+          action: "issue.blockers_updated",
+          text: "Updated blockers",
+          actorType: "agent",
+          actorId: "22222222-2222-4222-8222-222222222222",
+          agentId: "22222222-2222-4222-8222-222222222222",
+          userId: null,
+          createdAt: new Date("2026-04-06T12:06:00.000Z"),
+        },
+        latestHandoffSummary: {
+          kind: "handoff",
+          action: "issue.reviewers_updated",
+          text: "Updated reviewers",
+          actorType: "agent",
+          actorId: "33333333-3333-4333-8333-333333333333",
+          agentId: "33333333-3333-4333-8333-333333333333",
+          userId: null,
+          createdAt: new Date("2026-04-06T12:07:00.000Z"),
+        },
+      }),
+      childIssues: [],
+      onUpdate: vi.fn(),
+    });
+    await flush();
+
+    expect(container.textContent).toContain("Activity");
+    expect(container.textContent).toContain("Updated blockers");
+    expect(container.textContent).toContain("Handoff");
+    expect(container.textContent).toContain("Updated reviewers");
+
+    act(() => root.unmount());
+  });
+
+  it("allows editing structured handoff fields", async () => {
+    const onUpdate = vi.fn();
+    mockAgentsApi.list.mockResolvedValue([
+      { id: "11111111-1111-4111-8111-111111111111", name: "Main" },
+      { id: "22222222-2222-4222-8222-222222222222", name: "Ork" },
+      { id: "33333333-3333-4333-8333-333333333333", name: "Stitch" },
+    ]);
+
+    const root = renderProperties(container, {
+      issue: createIssue({
+        missionControl: {
+          collaboratorAgentIds: [],
+        },
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const fromTrigger = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Unassigned"));
+    expect(fromTrigger).not.toBeUndefined();
+
+    await act(async () => {
+      fromTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const orkOption = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Ork"));
+    expect(orkOption).not.toBeUndefined();
+
+    await act(async () => {
+      orkOption!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate.mock.calls.some(([arg]) =>
+      (arg as { missionControl?: { handoff?: { fromAgentId?: string } } }).missionControl?.handoff?.fromAgentId ===
+      "22222222-2222-4222-8222-222222222222")).toBe(true);
+
+    onUpdate.mockClear();
+    const requested = Array.from(container.querySelectorAll("textarea"))
+      .find((input) => input.getAttribute("placeholder") === "Requested next step");
+    expect(requested).not.toBeUndefined();
+
+    await act(async () => {
+      requested!.focus();
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+      setter?.call(requested!, "Review the orchestration draft");
+      requested!.dispatchEvent(new Event("input", { bubbles: true }));
+      requested!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      requested!.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    });
+
+    expect(onUpdate.mock.calls.some(([arg]) =>
+      (arg as { missionControl?: { handoff?: { requestedNextStep?: string } } }).missionControl?.handoff?.requestedNextStep ===
+      "Review the orchestration draft")).toBe(true);
 
     act(() => root.unmount());
   });

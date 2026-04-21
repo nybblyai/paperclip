@@ -66,8 +66,10 @@ function applyStatusSideEffects(
 
 export interface IssueFilters {
   status?: string;
+  ownerAgentId?: string;
   assigneeAgentId?: string;
   participantAgentId?: string;
+  needsHumanAttention?: boolean;
   assigneeUserId?: string;
   touchedByUserId?: string;
   inboxArchivedByUserId?: string;
@@ -97,7 +99,11 @@ type IssueActiveRunRow = {
   createdAt: Date;
 };
 type IssueWithLabels = IssueRow & { labels: IssueLabelRow[]; labelIds: string[] };
-type IssueWithLabelsAndRun = IssueWithLabels & { activeRun: IssueActiveRunRow | null };
+type IssueWithLabelsAndRun = IssueWithLabels & {
+  activeRun: IssueActiveRunRow | null;
+  latestActivitySummary?: IssueActivitySummary | null;
+  latestHandoffSummary?: IssueActivitySummary | null;
+};
 type IssueUserCommentStats = {
   issueId: string;
   myLastCommentAt: Date | null;
@@ -107,6 +113,32 @@ type IssueLastActivityStat = {
   issueId: string;
   latestCommentAt: Date | null;
   latestLogAt: Date | null;
+};
+type IssueActivitySummaryRow = {
+  issueId: string;
+  action: string;
+  actorType: "agent" | "user" | "system";
+  actorId: string;
+  agentId: string | null;
+  runId: string | null;
+  createdAt: Date;
+  details: Record<string, unknown> | null;
+};
+type IssueActivityActor = {
+  actorType: "agent" | "user" | "system";
+  actorId: string;
+  agentId?: string | null;
+  runId?: string | null;
+};
+type IssueActivitySummary = {
+  kind: "handoff" | "activity";
+  action: string;
+  text: string;
+  actorType: "agent" | "user" | "system";
+  actorId: string;
+  agentId: string | null;
+  userId: string | null;
+  createdAt: Date;
 };
 type IssueUserContextInput = {
   createdByUserId: string | null;
@@ -120,6 +152,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   blockedByIssueIds?: string[];
   inheritExecutionWorkspaceFromIssueId?: string | null;
+  defaultAssigneeUserId?: string | null;
 };
 type IssueRelationSummaryMap = {
   blockedBy: IssueRelationIssueSummary[];
@@ -133,9 +166,62 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 const ISSUE_LIST_DESCRIPTION_MAX_CHARS = 1200;
+const ISSUE_MISSION_CONTROL_WORKFLOW_STATE_KINDS = new Set([
+  "waiting_on_human",
+  "blocked_on_upstream",
+  "handed_off",
+  "resumed",
+]);
+const ISSUE_NOISE_ACTIONS = new Set([
+  "issue.read_marked",
+  "issue.read_unmarked",
+  "issue.inbox_archived",
+  "issue.inbox_unarchived",
+]);
 
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
+}
+
+function formatMissionControlWorkflowStateLabel(kind: string | null | undefined): string {
+  if (!kind) return "workflow state";
+  switch (kind) {
+    case "waiting_on_human":
+      return "waiting on human";
+    case "blocked_on_upstream":
+      return "blocked on upstream";
+    case "handed_off":
+      return "handed off";
+    case "resumed":
+      return "resumed";
+    default:
+      return kind.replace(/_/g, " ");
+  }
+}
+
+function summarizeMissionControlWorkflowStateChange(
+  nextWorkflowState: Record<string, unknown> | null,
+  previousWorkflowState: Record<string, unknown> | null,
+): string | null {
+  const nextKind = typeof nextWorkflowState?.kind === "string" ? nextWorkflowState.kind : null;
+  const previousKind = typeof previousWorkflowState?.kind === "string" ? previousWorkflowState.kind : null;
+  const nextResumedFrom = typeof nextWorkflowState?.resumedFrom === "string" ? nextWorkflowState.resumedFrom : null;
+  const previousResumedFrom =
+    typeof previousWorkflowState?.resumedFrom === "string" ? previousWorkflowState.resumedFrom : null;
+
+  if (!nextKind && !previousKind) return null;
+  if (!nextKind && previousKind) return "Cleared workflow state";
+  if (
+    nextKind === previousKind &&
+    nextResumedFrom === previousResumedFrom
+  ) {
+    return "Updated workflow state";
+  }
+  if (nextKind === "resumed") {
+    const resumedFromLabel = formatMissionControlWorkflowStateLabel(nextResumedFrom);
+    return nextResumedFrom ? `Marked resumed from ${resumedFromLabel}` : "Marked resumed";
+  }
+  return `Marked ${formatMissionControlWorkflowStateLabel(nextKind)}`;
 }
 
 async function getProjectDefaultGoalId(
@@ -544,6 +630,7 @@ const issueListSelect = {
   `,
   status: issues.status,
   priority: issues.priority,
+  ownerAgentId: issues.ownerAgentId,
   assigneeAgentId: issues.assigneeAgentId,
   assigneeUserId: issues.assigneeUserId,
   checkoutRunId: issues.checkoutRunId,
@@ -565,6 +652,7 @@ const issueListSelect = {
   executionWorkspaceId: issues.executionWorkspaceId,
   executionWorkspacePreference: issues.executionWorkspacePreference,
   executionWorkspaceSettings: sql<null>`null`,
+  missionControl: issues.missionControl,
   startedAt: issues.startedAt,
   completedAt: issues.completedAt,
   cancelledAt: issues.cancelledAt,
@@ -572,6 +660,221 @@ const issueListSelect = {
   createdAt: issues.createdAt,
   updatedAt: issues.updatedAt,
 };
+
+function normalizeMissionControlMetadata(
+  raw: Record<string, unknown> | null | undefined,
+  ownerAgentId: string | null | undefined,
+  issueContext?: { issueId: string; identifier: string | null; title: string } | null,
+): Record<string, unknown> | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+
+  const collaboratorAgentIds = Array.isArray(raw.collaboratorAgentIds)
+    ? Array.from(new Set(raw.collaboratorAgentIds.filter((value): value is string => typeof value === "string")))
+      .filter((agentId) => agentId !== ownerAgentId)
+    : [];
+
+  const handoffRaw = asRecord(raw.handoff);
+  const workflowStateRaw = asRecord(raw.workflowState);
+  const normalizedWorkflowState = workflowStateRaw
+    && typeof workflowStateRaw.kind === "string"
+    && ISSUE_MISSION_CONTROL_WORKFLOW_STATE_KINDS.has(workflowStateRaw.kind)
+    ? {
+        kind: workflowStateRaw.kind,
+        enteredAt: workflowStateRaw.enteredAt instanceof Date
+          ? workflowStateRaw.enteredAt
+          : typeof workflowStateRaw.enteredAt === "string" || typeof workflowStateRaw.enteredAt === "number"
+            ? new Date(workflowStateRaw.enteredAt)
+            : new Date(),
+        resumedFrom: workflowStateRaw.kind === "resumed" && typeof workflowStateRaw.resumedFrom === "string"
+          ? workflowStateRaw.resumedFrom
+          : null,
+      }
+    : null;
+  const normalizedHandoff = handoffRaw
+    ? {
+        fromAgentId: typeof handoffRaw.fromAgentId === "string" ? handoffRaw.fromAgentId : null,
+        toAgentId: typeof handoffRaw.toAgentId === "string" ? handoffRaw.toAgentId : null,
+        reason: typeof handoffRaw.reason === "string" ? handoffRaw.reason.trim() || null : null,
+        requestedNextStep: typeof handoffRaw.requestedNextStep === "string" ? handoffRaw.requestedNextStep.trim() || null : null,
+        unblockCondition: typeof handoffRaw.unblockCondition === "string" ? handoffRaw.unblockCondition.trim() || null : null,
+        timestamp: handoffRaw.timestamp instanceof Date
+          ? handoffRaw.timestamp
+          : typeof handoffRaw.timestamp === "string" || typeof handoffRaw.timestamp === "number"
+            ? new Date(handoffRaw.timestamp)
+            : new Date(),
+        context: issueContext
+          ? {
+              issueId: issueContext.issueId,
+              identifier: issueContext.identifier,
+              title: issueContext.title,
+            }
+          : asRecord(handoffRaw.context),
+      }
+    : null;
+
+  return {
+    ...raw,
+    collaboratorAgentIds,
+    ...(workflowStateRaw !== null ? { workflowState: normalizedWorkflowState } : {}),
+    ...(handoffRaw !== null ? { handoff: normalizedHandoff } : {}),
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function summarizeIssueUpdate(
+  details: Record<string, unknown> | null,
+  options?: { preferHandoff?: boolean },
+): string | null {
+  const record = asRecord(details);
+  if (!record) return null;
+  const previous = asRecord(record._previous);
+  const preferHandoff = options?.preferHandoff === true;
+  const handoff = asRecord(asRecord(record.missionControl)?.handoff);
+  const previousHandoff = asRecord(asRecord(previous?.missionControl)?.handoff);
+  if (preferHandoff && (handoff || previousHandoff)) {
+    if (handoff && !previousHandoff) return "Created handoff";
+    if (!handoff && previousHandoff) return "Cleared handoff";
+    if ((handoff?.toAgentId ?? null) !== (previousHandoff?.toAgentId ?? null)) return "Updated handoff target";
+    return "Updated handoff";
+  }
+  const workflowState = asRecord(asRecord(record.missionControl)?.workflowState);
+  const previousWorkflowState = asRecord(asRecord(previous?.missionControl)?.workflowState);
+  const workflowStateSummary = summarizeMissionControlWorkflowStateChange(workflowState, previousWorkflowState);
+  if (workflowStateSummary) {
+    return workflowStateSummary;
+  }
+  if (handoff || previousHandoff) {
+    if (handoff && !previousHandoff) return "Created handoff";
+    if (!handoff && previousHandoff) return "Cleared handoff";
+    if ((handoff?.toAgentId ?? null) !== (previousHandoff?.toAgentId ?? null)) return "Updated handoff target";
+    return "Updated handoff";
+  }
+  if (record.ownerAgentId !== undefined && previous?.ownerAgentId !== record.ownerAgentId) {
+    return record.ownerAgentId ? "Changed owner" : "Cleared owner";
+  }
+  if (record.assigneeAgentId !== undefined && previous?.assigneeAgentId !== record.assigneeAgentId) {
+    return record.assigneeAgentId ? "Reassigned agent" : "Cleared agent assignee";
+  }
+  if (record.assigneeUserId !== undefined && previous?.assigneeUserId !== record.assigneeUserId) {
+    return record.assigneeUserId ? "Reassigned user" : "Cleared user assignee";
+  }
+  if (record.status !== undefined && previous?.status !== record.status) {
+    return typeof record.status === "string" ? `Changed status to ${record.status.replace(/_/g, " ")}` : "Changed status";
+  }
+  const missionControl = asRecord(record.missionControl);
+  const previousMissionControl = asRecord(previous?.missionControl);
+  const needsHumanAttention = missionControl?.needsHumanAttention;
+  const previousNeedsHumanAttention = previousMissionControl?.needsHumanAttention;
+  if (
+    typeof needsHumanAttention === "boolean"
+    && needsHumanAttention !== previousNeedsHumanAttention
+  ) {
+    return needsHumanAttention ? "Marked needs human attention" : "Cleared needs human attention";
+  }
+  if (record.missionControl !== undefined || record.executionPolicy !== undefined || record.blockedByIssueIds !== undefined) {
+    return "Updated task details";
+  }
+  return "Updated issue";
+}
+
+function summarizeIssueActivity(action: string, details: Record<string, unknown> | null): string | null {
+  if (action === "issue.comment_added") return "Added comment";
+  if (action === "issue.blockers_updated") return "Updated blockers";
+  if (action === "issue.reviewers_updated") return "Updated reviewers";
+  if (action === "issue.approvers_updated") return "Updated approvers";
+  if (action === "issue.checked_out") return "Checked out task";
+  if (action === "issue.released") return "Released task";
+  if (action === "issue.document_created") return "Added document";
+  if (action === "issue.document_updated") return "Updated document";
+  if (action === "issue.document_restored") return "Restored document";
+  if (action === "issue.document_deleted") return "Deleted document";
+  if (action === "issue.work_product_created") return "Added work product";
+  if (action === "issue.work_product_updated") return "Updated work product";
+  if (action === "issue.work_product_deleted") return "Deleted work product";
+  if (action === "issue.attachment_added") return "Added attachment";
+  if (action === "issue.attachment_removed") return "Removed attachment";
+  if (action === "issue.updated") return summarizeIssueUpdate(details);
+  if (action === "issue.handoff_updated") return summarizeIssueUpdate(details, { preferHandoff: true });
+  return null;
+}
+
+function toIssueActivitySummary(
+  row: IssueActivitySummaryRow,
+  kind: "handoff" | "activity",
+): IssueActivitySummary | null {
+  const text = summarizeIssueActivity(row.action, row.details);
+  if (!text) return null;
+  return {
+    kind,
+    action: row.action,
+    text,
+    actorType: row.actorType,
+    actorId: row.actorId,
+    agentId: row.agentId,
+    userId: row.actorType === "user" ? row.actorId : null,
+    createdAt: row.createdAt,
+  };
+}
+
+function isStructuredHandoffActivity(row: IssueActivitySummaryRow): boolean {
+  return row.action === "issue.handoff_updated";
+}
+
+function isNoiseIssueActivity(row: IssueActivitySummaryRow): boolean {
+  if (ISSUE_NOISE_ACTIONS.has(row.action)) return true;
+  if (row.action === "issue.comment_added") return true;
+  return false;
+}
+
+async function getIssueActivitySummaries(
+  db: DbReader,
+  companyId: string,
+  issueIds: string[],
+) {
+  if (issueIds.length === 0) {
+    return { latestActivityByIssueId: new Map<string, IssueActivitySummary>(), latestHandoffByIssueId: new Map<string, IssueActivitySummary>() };
+  }
+
+  const rows = await db
+    .select({
+      issueId: activityLog.entityId,
+      action: activityLog.action,
+      actorType: activityLog.actorType,
+      actorId: activityLog.actorId,
+      agentId: activityLog.agentId,
+      runId: activityLog.runId,
+      createdAt: activityLog.createdAt,
+      details: activityLog.details,
+    })
+    .from(activityLog)
+    .where(
+      and(
+        eq(activityLog.companyId, companyId),
+        eq(activityLog.entityType, "issue"),
+        inArray(activityLog.entityId, issueIds),
+      ),
+    )
+    .orderBy(desc(activityLog.createdAt), desc(activityLog.id));
+
+  const latestActivityByIssueId = new Map<string, IssueActivitySummary>();
+  const latestHandoffByIssueId = new Map<string, IssueActivitySummary>();
+  for (const row of rows as IssueActivitySummaryRow[]) {
+    if (!latestActivityByIssueId.has(row.issueId) && !isNoiseIssueActivity(row)) {
+      const summary = toIssueActivitySummary(row, "activity");
+      if (summary) latestActivityByIssueId.set(row.issueId, summary);
+    }
+    if (!latestHandoffByIssueId.has(row.issueId) && isStructuredHandoffActivity(row)) {
+      const summary = toIssueActivitySummary(row, "handoff");
+      if (summary) latestHandoffByIssueId.set(row.issueId, summary);
+    }
+  }
+
+  return { latestActivityByIssueId, latestHandoffByIssueId };
+}
 
 function withActiveRuns(
   issueRows: IssueWithLabels[],
@@ -586,6 +889,87 @@ function withActiveRuns(
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
 
+  function buildPreviousIssueValues(
+    existing: typeof issues.$inferSelect,
+    updateFields: Record<string, unknown>,
+  ) {
+    const previous: Record<string, unknown> = {};
+    for (const [key, nextValue] of Object.entries(updateFields)) {
+      const previousValue = (existing as Record<string, unknown>)[key];
+      if (JSON.stringify(previousValue ?? null) !== JSON.stringify(nextValue ?? null)) {
+        previous[key] = previousValue;
+      }
+    }
+    return previous;
+  }
+
+  async function recordIssueUpdateActivity(
+    issue: typeof issues.$inferSelect,
+    existing: typeof issues.$inferSelect,
+    updateFields: Record<string, unknown>,
+    actor: IssueActivityActor,
+    dbOrTx: Db,
+  ) {
+    const previous = buildPreviousIssueValues(existing, updateFields);
+    const hasFieldChanges = Object.keys(previous).length > 0;
+
+    await dbOrTx.insert(activityLog).values({
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId ?? null,
+      runId: actor.runId ?? null,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        ...updateFields,
+        identifier: issue.identifier,
+        _previous: hasFieldChanges ? previous : undefined,
+      },
+    });
+
+    const previousMissionControl = (existing.missionControl ?? null) as Record<string, unknown> | null;
+    const nextMissionControl = (issue.missionControl ?? null) as Record<string, unknown> | null;
+    const previousHandoff = previousMissionControl && typeof previousMissionControl === "object"
+      ? previousMissionControl.handoff
+      : undefined;
+    const nextHandoff = nextMissionControl && typeof nextMissionControl === "object"
+      ? nextMissionControl.handoff
+      : undefined;
+    if (JSON.stringify(previousHandoff ?? null) !== JSON.stringify(nextHandoff ?? null)) {
+      await dbOrTx.insert(activityLog).values({
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId ?? null,
+        runId: actor.runId ?? null,
+        action: "issue.handoff_updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          identifier: issue.identifier,
+          missionControl: nextMissionControl,
+          _previous: {
+            missionControl: previousMissionControl,
+          },
+        },
+      });
+    }
+  }
+
+  async function withIssueActivitySummaries<T extends { id: string; companyId: string; updatedAt: Date }>(
+    issue: T | null,
+  ): Promise<(T & { latestActivitySummary?: IssueActivitySummary | null; latestHandoffSummary?: IssueActivitySummary | null }) | null> {
+    if (!issue) return null;
+    const { latestActivityByIssueId, latestHandoffByIssueId } = await getIssueActivitySummaries(db, issue.companyId, [issue.id]);
+    return {
+      ...issue,
+      latestActivitySummary: latestActivityByIssueId.get(issue.id) ?? null,
+      latestHandoffSummary: latestHandoffByIssueId.get(issue.id) ?? null,
+    };
+  }
+
   async function getIssueByUuid(id: string) {
     const row = await db
       .select()
@@ -594,7 +978,7 @@ export function issueService(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
-    return enriched;
+    return withIssueActivitySummaries(enriched);
   }
 
   async function getIssueByIdentifier(identifier: string) {
@@ -605,7 +989,7 @@ export function issueService(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
-    return enriched;
+    return withIssueActivitySummaries(enriched);
   }
 
   function redactIssueComment<T extends { body: string }>(comment: T, censorUsernameInLogs: boolean): T {
@@ -989,6 +1373,9 @@ export function issueService(db: Db) {
         const statuses = filters.status.split(",").map((s) => s.trim());
         conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
       }
+      if (filters?.ownerAgentId) {
+        conditions.push(eq(issues.ownerAgentId, filters.ownerAgentId));
+      }
       if (filters?.assigneeAgentId) {
         conditions.push(eq(issues.assigneeAgentId, filters.assigneeAgentId));
       }
@@ -1021,6 +1408,9 @@ export function issueService(db: Db) {
           .where(and(eq(issueLabels.companyId, companyId), eq(issueLabels.labelId, filters.labelId)));
         if (labeledIssueIds.length === 0) return [];
         conditions.push(inArray(issues.id, labeledIssueIds.map((row) => row.issueId)));
+      }
+      if (filters?.needsHumanAttention === true) {
+        conditions.push(sql<boolean>`coalesce((${issues.missionControl} ->> 'needsHumanAttention')::boolean, false) = true`);
       }
       if (hasSearch) {
         conditions.push(
@@ -1165,6 +1555,7 @@ export function issueService(db: Db) {
           return [...byIssueId.values()];
         }),
       ]);
+      const { latestActivityByIssueId, latestHandoffByIssueId } = await getIssueActivitySummaries(db, companyId, issueIds);
       const statsByIssueId = new Map(statsRows.map((row) => [row.issueId, row]));
       const lastActivityByIssueId = new Map(lastActivityRows.map((row) => [row.issueId, row]));
 
@@ -1179,6 +1570,8 @@ export function issueService(db: Db) {
           return {
             ...row,
             lastActivityAt,
+            latestActivitySummary: latestActivityByIssueId.get(row.id) ?? null,
+            latestHandoffSummary: latestHandoffByIssueId.get(row.id) ?? null,
           };
         });
       }
@@ -1195,6 +1588,8 @@ export function issueService(db: Db) {
         return {
           ...row,
           lastActivityAt,
+          latestActivitySummary: latestActivityByIssueId.get(row.id) ?? null,
+          latestHandoffSummary: latestHandoffByIssueId.get(row.id) ?? null,
           ...deriveIssueUserContext(row, contextUserId, {
             myLastCommentAt: statsByIssueId.get(row.id)?.myLastCommentAt ?? null,
             myLastReadAt: readByIssueId.get(row.id) ?? null,
@@ -1429,24 +1824,44 @@ export function issueService(db: Db) {
         labelIds: inputLabelIds,
         blockedByIssueIds,
         inheritExecutionWorkspaceFromIssueId,
+        defaultAssigneeUserId,
         ...issueData
       } = data;
+      if (!issueData.assigneeAgentId && !issueData.assigneeUserId && defaultAssigneeUserId) {
+        issueData.assigneeUserId = defaultAssigneeUserId;
+      }
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
       }
-      if (data.assigneeAgentId && data.assigneeUserId) {
+      if (issueData.assigneeAgentId && issueData.assigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
       }
-      if (data.assigneeAgentId) {
-        await assertAssignableAgent(companyId, data.assigneeAgentId);
+      if (issueData.assigneeAgentId) {
+        await assertAssignableAgent(companyId, issueData.assigneeAgentId);
       }
-      if (data.assigneeUserId) {
-        await assertAssignableUser(companyId, data.assigneeUserId);
+      if (issueData.ownerAgentId) {
+        await assertAssignableAgent(companyId, issueData.ownerAgentId);
       }
-      if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
+      if (issueData.assigneeUserId) {
+        await assertAssignableUser(companyId, issueData.assigneeUserId);
+      }
+      const collaboratorAgentIds = Array.isArray(issueData.missionControl?.collaboratorAgentIds)
+        ? issueData.missionControl.collaboratorAgentIds
+        : [];
+      for (const collaboratorAgentId of collaboratorAgentIds) {
+        await assertAssignableAgent(companyId, collaboratorAgentId);
+      }
+      const createHandoff = asRecord(issueData.missionControl?.handoff);
+      const handoffAgentIds = [createHandoff?.fromAgentId, createHandoff?.toAgentId].filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      );
+      for (const handoffAgentId of handoffAgentIds) {
+        await assertAssignableAgent(companyId, handoffAgentId);
+      }
+      if (issueData.status === "in_progress" && !issueData.assigneeAgentId && !issueData.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {
@@ -1551,9 +1966,16 @@ export function issueService(db: Db) {
 
         const issueNumber = company.issueCounter;
         const identifier = `${company.issuePrefix}-${issueNumber}`;
+        const issueId = issueData.id ?? crypto.randomUUID();
 
         const values = {
           ...issueData,
+          id: issueId,
+          missionControl: normalizeMissionControlMetadata(
+            issueData.missionControl as Record<string, unknown> | null | undefined,
+            issueData.ownerAgentId ?? null,
+            { issueId, identifier, title: issueData.title },
+          ),
           originKind: issueData.originKind ?? "manual",
           goalId: resolveIssueGoalId({
             projectId: issueData.projectId,
@@ -1635,8 +2057,16 @@ export function issueService(db: Db) {
         assertTransition(existing.status, issueData.status);
       }
 
+      const nextMissionControl = normalizeMissionControlMetadata(
+        (issueData.missionControl as Record<string, unknown> | null | undefined)
+          ?? (existing.missionControl as Record<string, unknown> | null | undefined),
+        issueData.ownerAgentId !== undefined ? issueData.ownerAgentId : existing.ownerAgentId,
+        { issueId: existing.id, identifier: existing.identifier, title: issueData.title ?? existing.title },
+      );
+
       const patch: Partial<typeof issues.$inferInsert> = {
         ...issueData,
+        ...(issueData.missionControl !== undefined ? { missionControl: nextMissionControl } : {}),
         updatedAt: new Date(),
       };
 
@@ -1654,8 +2084,24 @@ export function issueService(db: Db) {
       if (issueData.assigneeAgentId) {
         await assertAssignableAgent(existing.companyId, issueData.assigneeAgentId);
       }
+      if (issueData.ownerAgentId) {
+        await assertAssignableAgent(existing.companyId, issueData.ownerAgentId);
+      }
       if (issueData.assigneeUserId) {
         await assertAssignableUser(existing.companyId, issueData.assigneeUserId);
+      }
+      const collaboratorAgentIds = Array.isArray(nextMissionControl?.collaboratorAgentIds)
+        ? nextMissionControl.collaboratorAgentIds.filter((value): value is string => typeof value === "string")
+        : [];
+      for (const collaboratorAgentId of collaboratorAgentIds) {
+        await assertAssignableAgent(existing.companyId, collaboratorAgentId);
+      }
+      const handoff = asRecord(nextMissionControl?.handoff);
+      const handoffAgentIds = [handoff?.fromAgentId, handoff?.toAgentId].filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      );
+      for (const handoffAgentId of handoffAgentIds) {
+        await assertAssignableAgent(existing.companyId, handoffAgentId);
       }
       const nextProjectId = issueData.projectId !== undefined ? issueData.projectId : existing.projectId;
       const nextProjectWorkspaceId =
@@ -1740,6 +2186,34 @@ export function issueService(db: Db) {
       };
 
       return dbOrTx === db ? db.transaction(runUpdate) : runUpdate(dbOrTx);
+    },
+
+    updateWithActivity: async (
+      id: string,
+      data: Partial<typeof issues.$inferInsert> & {
+        labelIds?: string[];
+        blockedByIssueIds?: string[];
+        actorAgentId?: string | null;
+        actorUserId?: string | null;
+      },
+      actor: IssueActivityActor,
+      dbOrTx: any = db,
+    ) => {
+      const existing = await dbOrTx
+        .select()
+        .from(issues)
+        .where(eq(issues.id, id))
+        .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
+      if (!existing) return null;
+
+      const runUpdateWithActivity = async (tx: any) => {
+        const updated = await issueService(tx).update(id, data, tx);
+        if (!updated) return null;
+        await recordIssueUpdateActivity(updated, existing, data as Record<string, unknown>, actor, tx);
+        return updated;
+      };
+
+      return dbOrTx === db ? db.transaction(runUpdateWithActivity) : runUpdateWithActivity(dbOrTx);
     },
 
     remove: (id: string) =>

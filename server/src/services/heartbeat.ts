@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import type { BillingType, ExecutionWorkspace, ExecutionWorkspaceConfig } from "@paperclipai/shared";
+import { isUuidLike, type BillingType, type ExecutionWorkspace, type ExecutionWorkspaceConfig } from "@paperclipai/shared";
 import {
   agents,
   agentRuntimeState,
@@ -1487,6 +1487,20 @@ function resolveNextSessionState(input: {
   };
 }
 
+export function resolveExternalRunId(input: {
+  adapterResult: AdapterExecutionResult;
+  persistedResultJson: Record<string, unknown> | null;
+}): string | null {
+  const result = input.persistedResultJson;
+  return (
+    readNonEmptyString(result?.externalRunId)
+    ?? readNonEmptyString(result?.runId)
+    ?? readNonEmptyString(result?.acceptedRunId)
+    ?? readNonEmptyString(input.adapterResult.errorMeta?.externalRunId)
+    ?? null
+  );
+}
+
 export function heartbeatService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
@@ -1518,6 +1532,19 @@ export function heartbeatService(db: Db) {
       .select(opts?.unsafeFullResultJson ? getTableColumns(heartbeatRuns) : heartbeatRunSafeColumns)
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function getRequestedByActorForRun(runId: string) {
+    const run = await getRun(runId);
+    if (!run?.wakeupRequestId) return null;
+    return db
+      .select({
+        actorType: agentWakeupRequests.requestedByActorType,
+        actorId: agentWakeupRequests.requestedByActorId,
+      })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, run.wakeupRequestId))
       .then((rows) => rows[0] ?? null);
   }
 
@@ -2247,6 +2274,8 @@ export function heartbeatService(db: Db) {
   }
 
   async function clearDetachedRunWarning(runId: string) {
+    if (!isUuidLike(runId)) return null;
+
     const updated = await db
       .update(heartbeatRuns)
       .set({
@@ -2867,6 +2896,9 @@ export function heartbeatService(db: Db) {
         status: heartbeatRuns.status,
         error: heartbeatRuns.error,
         errorCode: heartbeatRuns.errorCode,
+        resultJson: heartbeatRuns.resultJson,
+        finishedAt: heartbeatRuns.finishedAt,
+        updatedAt: heartbeatRuns.updatedAt,
         contextSnapshot: heartbeatRuns.contextSnapshot,
       })
       .from(heartbeatRuns)
@@ -2910,6 +2942,22 @@ export function heartbeatService(db: Db) {
     ]);
 
     return Boolean(run || deferredWake);
+  }
+
+  function isAcceptedTimeoutContinuationGracePeriod(
+    latestRun: {
+      status: string;
+      resultJson?: Record<string, unknown> | null;
+      finishedAt?: Date | null;
+      updatedAt?: Date | null;
+    } | null,
+  ): boolean {
+    if (!latestRun || latestRun.status !== "succeeded") return false;
+    const resultJson = parseObject(latestRun.resultJson);
+    if (readNonEmptyString(resultJson.deliveryStatus) !== "accepted_timeout") return false;
+    const finishedAt = latestRun.finishedAt ?? latestRun.updatedAt;
+    if (!(finishedAt instanceof Date)) return false;
+    return Date.now() - finishedAt.getTime() < 5 * 60_000;
   }
 
   async function enqueueStrandedIssueRecovery(input: {
@@ -3039,6 +3087,11 @@ export function heartbeatService(db: Db) {
       const latestRun = await getLatestIssueRun(issue.companyId, issue.id);
       const latestContext = parseObject(latestRun?.contextSnapshot);
       const latestRetryReason = readNonEmptyString(latestContext.retryReason);
+
+      if (issue.status === "in_progress" && isAcceptedTimeoutContinuationGracePeriod(latestRun)) {
+        result.skipped += 1;
+        continue;
+      }
 
       if (issue.status === "todo") {
         if (!latestRun || latestRun.status === "succeeded") {
@@ -4007,6 +4060,10 @@ export function heartbeatService(db: Db) {
         adapterResult.resultJson ?? null,
         adapterResult.summary ?? null,
       );
+      const externalRunId = resolveExternalRunId({
+        adapterResult,
+        persistedResultJson,
+      });
 
       await setRunStatus(run.id, status, {
         finishedAt: new Date(),
@@ -4029,6 +4086,7 @@ export function heartbeatService(db: Db) {
         signal: adapterResult.signal,
         usageJson,
         resultJson: persistedResultJson,
+        externalRunId,
         sessionIdAfter: nextSessionState.displayId ?? nextSessionState.legacySessionId,
         stdoutExcerpt,
         stderrExcerpt,
@@ -5374,6 +5432,8 @@ export function heartbeatService(db: Db) {
         .limit(1);
       return run ?? null;
     },
+
+    getRequestedByActorForRun,
 
     getActiveRunForAgent: async (agentId: string) => {
       const [run] = await db

@@ -17,6 +17,17 @@ interface AgentPropertiesProps {
 
 const roleLabels = AGENT_ROLE_LABELS as Record<string, string>;
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function asNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function PropertyRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-start gap-3 py-1.5">
@@ -28,6 +39,11 @@ function PropertyRow({ label, children }: { label: string; children: React.React
 
 export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
   const { selectedCompanyId } = useCompany();
+  const adapterConfig = asRecord(agent.adapterConfig);
+  const mappedOpenClawAgentId = agent.adapterType === "openclaw_gateway"
+    ? asNonEmptyString(adapterConfig?.agentId)
+    : null;
+  const runtimeSession = runtimeState?.sessionDisplayId ?? runtimeState?.sessionId ?? null;
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -54,16 +70,19 @@ export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
         <PropertyRow label="Adapter">
           <span className="text-sm font-mono">{getAdapterLabel(agent.adapterType)}</span>
         </PropertyRow>
+        {mappedOpenClawAgentId && (
+          <PropertyRow label="OpenClaw Agent">
+            <span className="text-sm font-mono">{mappedOpenClawAgentId}</span>
+          </PropertyRow>
+        )}
       </div>
 
       <Separator />
 
       <div className="space-y-1">
-        {(runtimeState?.sessionDisplayId ?? runtimeState?.sessionId) && (
-          <PropertyRow label="Session">
-            <span className="text-xs font-mono">
-              {String(runtimeState.sessionDisplayId ?? runtimeState.sessionId).slice(0, 12)}...
-            </span>
+        {runtimeSession && (
+          <PropertyRow label={agent.adapterType === "openclaw_gateway" ? "OpenClaw Session" : "Session"}>
+            <span className="text-xs font-mono break-all">{runtimeSession}</span>
           </PropertyRow>
         )}
         {runtimeState?.lastError && (

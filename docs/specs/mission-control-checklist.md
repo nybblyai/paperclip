@@ -1,0 +1,118 @@
+# Paperclip Mission Control Checklist
+
+> Source of truth for the mission-control feature on branch `feat/mission-control-customization-lane`.
+
+## Goal
+Lock the full Paperclip mission-control feature into an explicit tracked checklist so Ork can update it until the feature is complete and ready for real use.
+
+## Definition of done
+This feature is only done when:
+- Paperclip can represent multi-agent ownership, collaboration, handoffs, waiting/blocking, and human-attention cleanly
+- Main/Ork/Stitch/Personal OS orchestration can map into Paperclip without relying on transcript archaeology
+- OpenClaw agents actually delegate by specialty instead of loosely overlapping, for example Personal OS routes product/build implementation work to Main/Ork/Stitch rather than trying to own it
+- Telegram-visible summaries can emerge from structured state instead of manual retelling
+- the implementation is verified well enough to start using on real tracked work
+
+## Current status snapshot
+- Branch: `feat/mission-control-customization-lane`
+- Implementation owner: `ork`
+- Product/orchestration owner: `main`
+- Current state: foundational metadata, ownership, filters, visibility primitives, structured handoffs, explicit workflow-state modeling, the first operator controls in `IssueProperties`, and the first operational inbox views are now in place; `Resume` now records the existing `resumed` workflow state instead of clearing context, `Resolve handoff` now clears active handoff state through the same issue update surface and keeps handoff/history wording legible, `Reassign owner` now promotes the active handoff target through the same owner/mission-control plumbing so ownership stays clean, `Escalate` now raises `needsHumanAttention` through the same minimal mission-control payload while preserving any existing workflow state, `Inbox` now exposes practical operational view chips for the broader operator queue, Main/Ork/Stitch/Personal OS owner slices when those agents exist, needs-human, blocked/waiting, and recent handoffs by reusing the existing issue filter/view plumbing, the operator queue now stays high-signal in mixed inbox batches by limiting that view to mission-control ownership/attention/handoff/workflow lanes instead of every open issue, the latest handoff-summary lane now treats structured `issue.handoff_updated` activity as the durable handoff/history source instead of letting reviewer/approver churn masquerade as mission-control handoffs, the latest activity-summary lane now ignores generic `issue.comment_added` churn so neither run-linked transcript comments nor plain manual operational comments overwrite fresher mission-control workflow-state updates, realistic mixed mission-control run coverage now verifies that structured handoffs remain durable while `needsHumanAttention` escalations summarize as a compact high-signal activity instead of falling back to generic task-detail wording, the dedicated OpenClaw integration spec now also defines the durable delegation boundary: `Main` stays the coordination surface, `Ork` owns engineering execution, `Stitch` owns design/product-specialist execution, `Personal OS` is restricted to personal/admin support, structured handoffs are required whenever ownership, expected-next-actor, or blocker/waiting responsibility changes or durable state would otherwise be inferred from chat, comment-only updates are reserved for non-durable narration/clarification, and the same integration spec now defines Telegram emergence as a projection of existing issue state, mission-control metadata, activity summaries, and linked approvals with summary-mode chatter suppression by default plus an opt-in transparent mode for extra narration, the direct `issueService` mission-control scenario still exercises a real `Personal OS -> Ork` reroute without widening to the route layer, the broader route-level validation proves agent-authenticated `Main -> Ork` and `Main -> Stitch` handoffs survive the real `PATCH /api/issues/:id` path with the existing structured mission-control payload plus comment and emit the durable `issue.updated` / `issue.handoff_updated` activity pair, the authenticated needs-human-attention validation proves an agent key can escalate through the same real `PATCH /api/issues/:id` route using only the existing issue update/comment payload while preserving the compact `issue.updated` activity contract without emitting a parallel handoff event, the blocked/resume route-path slice proves an agent key can move a blocked issue back to `todo` through that same existing `PATCH /api/issues/:id` contract with a compact resumed workflow-state history while a matching `issueService.list` scenario keeps the resumed state as the latest meaningful activity even after follow-up comment noise, the new pure Telegram projection coverage now proves summary mode and transparent mode keep the same structured mission-control headline while transparent mode may append recent narration without letting comments override durable blocker or ownership truth, and one full tracked-work dry run now proves the operator can see the current owner, next step, latest meaningful history, and compact summary output after a real `Main -> Ork -> blocked -> resumed` sequence without rereading transcript chatter
+
+## Checklist
+
+### 0. Foundation already landed
+- [x] Mission-control metadata support on issues
+- [x] `ownerAgentId` support on issues
+- [x] collaborator agent support
+- [x] `needsHumanAttention` support
+- [x] source-of-truth / blocker / next-step issue metadata editing
+- [x] owner + attention filtering
+- [x] compact issue activity/handoff summaries
+- [x] dependency install + targeted tests/typechecks passing for landed slices
+
+### 1. Structured handoffs
+- [x] Define first-class handoff shape in shared types/schema
+- [x] Persist handoff data cleanly in DB/storage path
+- [x] Support handoff create/update/read through server/API
+- [x] Render handoff information in useful UI surfaces
+- [x] Ensure handoffs include: from, to, reason, requested next step, unblock condition, timestamp, issue context
+- [x] Add tests/typechecks for handoff shape and usage
+
+### 2. Task/control-plane state model
+- [x] Decide and implement orchestration-specific states or equivalent conventions
+- [x] Support waiting-on-human
+- [x] Support blocked-on-upstream
+- [x] Support handed-off / resumed flows
+- [x] Make state transitions legible in UI/API
+- [x] Add verification for state transitions
+
+### 3. Operator control actions
+- [x] Reassign owner cleanly
+- [x] Mark waiting
+- [x] Mark blocked on upstream
+- [x] Escalate
+- [x] Resume
+- [x] Close loop / resolve handoff
+- [x] Verify control actions update summaries/state correctly
+
+### 4. Ownership and operational views
+- [x] View/filter for work owned by Main
+- [x] View/filter for work owned by Ork
+- [x] View/filter for work owned by Stitch
+- [x] View/filter for work owned by Personal OS
+- [x] View/filter for needs-human-attention
+- [x] View/filter for blocked/stalled work
+- [x] View/filter for recent handoffs
+- [x] Validate the operator queue against mixed Main/Ork/Stitch/Personal OS workflow fixtures so generic open-issue noise stays out
+
+### 5. Task history / orchestration context
+- [x] Durable history for meaningful handoffs and state changes
+- [x] Clear latest meaningful actor/update display
+- [x] Avoid transcript-noise creep in summaries
+- [x] Verify history remains high-signal and compact
+
+### 6. OpenClaw integration glue and delegation rules
+- [x] Define how Main creates/updates Paperclip tasks
+- [x] Define how Ork/Stitch/Personal OS publish structured handoffs
+- [x] Define identity mapping between OpenClaw agents and Paperclip ownership fields
+- [x] Define when work stays in chat vs becomes a tracked Paperclip task
+- [x] Define how task status sync should work
+- [x] Define specialty-based routing rules across Main, Ork, Stitch, and Personal OS
+- [x] Ensure Personal OS defers product/build implementation work to Main/Ork/Stitch instead of owning it directly
+- [x] Ensure Main remains the coordination surface while Ork owns engineering execution and Stitch owns design/product-specialist work
+- [x] Define delegation triggers and handoff rules so cross-agent routing happens predictably instead of ad hoc
+- [x] Verify delegation behavior with at least one real cross-agent scenario
+
+### 7. Telegram emergence and behavior
+- [x] Map Paperclip structured state to Telegram summary output
+- [x] Define which events surface automatically
+- [x] Define blocker/approval/milestone emergence rules
+- [x] Keep low-level chatter suppressed by default
+- [x] Verify summary mode vs transparent mode behavior
+
+### 8. Real-use readiness
+- [x] Run end-to-end test of Main -> Ork handoff through Paperclip
+- [x] Run cross-agent scenario involving at least one specialist handoff
+- [x] Run a needs-human-attention scenario
+- [x] Run a blocked/resume scenario
+- [x] Confirm the feature is usable for real tracked work
+- [ ] Decide whether to open PR / merge / continue iteration
+
+## Current recommended next slice
+- Decide whether to merge the draft PR as-is or keep iterating while the unrelated repo-wide verification blockers remain outstanding
+
+## Current blockers
+- No hard blocker for the docs/spec slice that just landed
+- Repo-wide `pnpm -r typecheck` is currently blocked by an unrelated duplicate DB migration number (`0057_gentle_mission_control.sql` and `0057_tidy_join_requests.sql`)
+- Broader verification hit an unrelated existing ordering-sensitive failure in `server/src/__tests__/issues-service.test.ts` (`wakes parents only when all direct children are terminal` expects a different `childIssueIds` order)
+- Telegram mode behavior is covered at the pure projection layer; no delivery integration is in scope for this pass
+
+## Update rule for Ork
+When meaningful progress lands, Ork should update this checklist with:
+- what is complete
+- what is in progress
+- any blocker
+- next recommended slice
+
+Do not mark the feature done just because code exists. It is done when the orchestration workflow is actually usable.

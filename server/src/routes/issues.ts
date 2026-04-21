@@ -282,6 +282,17 @@ function buildExecutionStageWakeup(input: {
   return null;
 }
 
+async function resolveDefaultSubtaskAssigneeUserId(input: {
+  actor: ReturnType<typeof getActorInfo>;
+  heartbeat: ReturnType<typeof heartbeatService>;
+  parentId: string | null | undefined;
+}) {
+  if (input.actor.actorType !== "agent" || !input.parentId || !input.actor.runId) return null;
+  const requestedBy = await input.heartbeat.getRequestedByActorForRun?.(input.actor.runId);
+  if (requestedBy?.actorType !== "user") return null;
+  return requestedBy.actorId ?? null;
+}
+
 export function issueRoutes(
   db: Db,
   storage: StorageService,
@@ -642,8 +653,13 @@ export function issueRoutes(
 
     const result = await svc.list(companyId, {
       status: req.query.status as string | undefined,
+      ownerAgentId: req.query.ownerAgentId as string | undefined,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
       participantAgentId: req.query.participantAgentId as string | undefined,
+      needsHumanAttention:
+        req.query.needsHumanAttention === "true" || req.query.needsHumanAttention === "1"
+          ? true
+          : undefined,
       assigneeUserId,
       touchedByUserId,
       inboxArchivedByUserId,
@@ -1330,17 +1346,24 @@ export function issueRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    if (req.body.assigneeAgentId || req.body.assigneeUserId) {
+
+    const actor = getActorInfo(req);
+    const defaultAssigneeUserId = await resolveDefaultSubtaskAssigneeUserId({
+      actor,
+      heartbeat,
+      parentId: req.body.parentId as string | null | undefined,
+    });
+    if (req.body.assigneeAgentId || req.body.assigneeUserId || defaultAssigneeUserId) {
       await assertCanAssignTasks(req, companyId);
     }
 
-    const actor = getActorInfo(req);
     const executionPolicy = normalizeIssueExecutionPolicy(req.body.executionPolicy);
     const issue = await svc.create(companyId, {
       ...req.body,
       executionPolicy,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      defaultAssigneeUserId,
     });
 
     await logActivity(db, {
@@ -1636,6 +1659,30 @@ export function issueRoutes(
         _previous: hasFieldChanges ? previous : undefined,
       },
     });
+
+    const previousMissionControl = (existing.missionControl ?? null) as Record<string, unknown> | null;
+    const nextMissionControl = (issue.missionControl ?? null) as Record<string, unknown> | null;
+    const previousHandoff = previousMissionControl && typeof previousMissionControl === "object" ? previousMissionControl.handoff : undefined;
+    const nextHandoff = nextMissionControl && typeof nextMissionControl === "object" ? nextMissionControl.handoff : undefined;
+    if (JSON.stringify(previousHandoff ?? null) !== JSON.stringify(nextHandoff ?? null)) {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.handoff_updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          identifier: issue.identifier,
+          missionControl: nextMissionControl,
+          _previous: {
+            missionControl: previousMissionControl,
+          },
+        },
+      });
+    }
 
     if (Array.isArray(req.body.blockedByIssueIds)) {
       const previousBlockedByIds = new Set((existingRelations?.blockedBy ?? []).map((relation) => relation.id));

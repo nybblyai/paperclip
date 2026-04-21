@@ -98,6 +98,62 @@ function humanizeValue(value: unknown): string {
   return value.replace(/_/g, " ");
 }
 
+function workflowStateLabel(kind: unknown): string {
+  if (typeof kind !== "string" || !kind) return "workflow state";
+  switch (kind) {
+    case "waiting_on_human":
+      return "waiting on human";
+    case "blocked_on_upstream":
+      return "blocked on upstream";
+    case "handed_off":
+      return "handed off";
+    case "resumed":
+      return "resumed";
+    default:
+      return humanizeValue(kind);
+  }
+}
+
+function readWorkflowState(details: ActivityDetails) {
+  return asRecord(asRecord(details?.missionControl)?.workflowState);
+}
+
+function formatWorkflowStateChange(details: ActivityDetails): string | null {
+  if (!details) return null;
+  const previous = asRecord(details._previous) ?? {};
+  const nextWorkflowState = readWorkflowState(details);
+  const previousWorkflowState = readWorkflowState(previous);
+  const nextKind = typeof nextWorkflowState?.kind === "string" ? nextWorkflowState.kind : null;
+  const previousKind = typeof previousWorkflowState?.kind === "string" ? previousWorkflowState.kind : null;
+  const nextResumedFrom =
+    typeof nextWorkflowState?.resumedFrom === "string" ? nextWorkflowState.resumedFrom : null;
+  const previousResumedFrom =
+    typeof previousWorkflowState?.resumedFrom === "string" ? previousWorkflowState.resumedFrom : null;
+
+  if (!nextKind && !previousKind) return null;
+  if (!nextKind && previousKind) return "cleared the workflow state";
+  if (nextKind === previousKind && nextResumedFrom === previousResumedFrom) return "updated the workflow state";
+  if (nextKind === "resumed") {
+    return nextResumedFrom
+      ? `marked the issue resumed from ${workflowStateLabel(nextResumedFrom)}`
+      : "marked the issue resumed";
+  }
+  return `marked the issue ${workflowStateLabel(nextKind)}`;
+}
+
+function formatHandoffChange(details: ActivityDetails): string | null {
+  if (!details) return null;
+  const previous = asRecord(details._previous) ?? {};
+  const nextHandoff = asRecord(asRecord(details.missionControl)?.handoff);
+  const previousHandoff = asRecord(asRecord(previous.missionControl)?.handoff);
+
+  if (!nextHandoff && !previousHandoff) return null;
+  if (nextHandoff && !previousHandoff) return "created handoff";
+  if (!nextHandoff && previousHandoff) return "cleared handoff";
+  if ((nextHandoff?.toAgentId ?? null) !== (previousHandoff?.toAgentId ?? null)) return "updated handoff target";
+  return "updated handoff";
+}
+
 function isActivityParticipant(value: unknown): value is ActivityParticipant {
   const record = asRecord(value);
   if (!record) return false;
@@ -188,6 +244,9 @@ function formatIssueUpdatedAction(details: ActivityDetails, options: ActivityFor
   if (!details) return null;
   const previous = asRecord(details._previous) ?? {};
   const parts: string[] = [];
+  const workflowStateChange = formatWorkflowStateChange(details);
+
+  if (workflowStateChange) parts.push(workflowStateChange);
 
   if (details.status !== undefined) {
     const from = previous.status;
@@ -295,6 +354,11 @@ export function formatIssueActivityAction(
     forIssueDetail: true,
   });
   if (structuredChange) return structuredChange;
+
+  if (action === "issue.handoff_updated") {
+    const handoffChange = formatHandoffChange(details);
+    if (handoffChange) return handoffChange;
+  }
 
   if (
     (action === "issue.document_created" || action === "issue.document_updated" || action === "issue.document_deleted") &&

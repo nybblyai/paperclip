@@ -1,4 +1,5 @@
 import type {
+  IssueMissionControlWorkflowStateKind,
   IssueExecutionDecisionOutcome,
   IssueExecutionPolicyMode,
   IssueExecutionStageType,
@@ -173,6 +174,49 @@ export interface IssueExecutionDecision {
   updatedAt: Date;
 }
 
+export interface IssueMissionControlMetadata {
+  sourceOfTruthPath?: string | null;
+  nextStep?: string | null;
+  blocker?: string | null;
+  collaboratorAgentIds?: string[];
+  needsHumanAttention?: boolean;
+  workflowState?: IssueMissionControlWorkflowState | null;
+  handoff?: IssueHandoff | null;
+}
+
+export interface IssueMissionControlWorkflowState {
+  kind: IssueMissionControlWorkflowStateKind;
+  enteredAt: Date;
+  resumedFrom?: Exclude<IssueMissionControlWorkflowStateKind, "resumed"> | null;
+}
+
+export interface IssueHandoffContext {
+  issueId: string;
+  identifier: string | null;
+  title: string;
+}
+
+export interface IssueHandoff {
+  fromAgentId: string | null;
+  toAgentId: string | null;
+  reason: string | null;
+  requestedNextStep: string | null;
+  unblockCondition: string | null;
+  timestamp: Date;
+  context: IssueHandoffContext;
+}
+
+export interface IssueActivitySummary {
+  kind: "handoff" | "activity";
+  action: string;
+  text: string;
+  actorType: "agent" | "user" | "system";
+  actorId: string;
+  agentId?: string | null;
+  userId?: string | null;
+  createdAt: Date;
+}
+
 export interface Issue {
   id: string;
   companyId: string;
@@ -185,6 +229,7 @@ export interface Issue {
   description: string | null;
   status: IssueStatus;
   priority: IssuePriority;
+  ownerAgentId?: string | null;
   assigneeAgentId: string | null;
   assigneeUserId: string | null;
   checkoutRunId: string | null;
@@ -206,6 +251,9 @@ export interface Issue {
   executionWorkspaceId: string | null;
   executionWorkspacePreference: string | null;
   executionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
+  missionControl?: IssueMissionControlMetadata | null;
+  latestActivitySummary?: IssueActivitySummary | null;
+  latestHandoffSummary?: IssueActivitySummary | null;
   startedAt: Date | null;
   completedAt: Date | null;
   cancelledAt: Date | null;

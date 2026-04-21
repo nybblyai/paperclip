@@ -6,8 +6,10 @@ import {
   activityLog,
   agents,
   companies,
+  companyMemberships,
   createDb,
   executionWorkspaces,
+  heartbeatRuns,
   instanceSettings,
   issueComments,
   issueInboxArchives,
@@ -22,6 +24,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { issueService } from "../services/issues.ts";
+import { buildTelegramMissionControlSummary } from "../services/telegram-mission-control-summary.js";
 import { buildProjectMentionHref } from "@paperclipai/shared";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -66,6 +69,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.delete(issueRelations);
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
+    await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -696,6 +700,985 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(result.find((issue) => issue.id === olderIssueId)?.lastActivityAt?.toISOString()).toBe(
       "2026-03-26T10:00:00.000Z",
     );
+  });
+
+  it("derives compact latest activity summaries for workflow-state updates", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Resume the task",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "user",
+      actorId: "user-1",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: issueId,
+      createdAt: new Date("2026-04-18T11:00:00.000Z"),
+      details: {
+        missionControl: {
+          workflowState: {
+            kind: "resumed",
+            enteredAt: "2026-04-18T11:00:00.000Z",
+            resumedFrom: "waiting_on_human",
+          },
+        },
+        _previous: {
+          missionControl: {
+            workflowState: {
+              kind: "waiting_on_human",
+              enteredAt: "2026-04-18T10:00:00.000Z",
+            },
+          },
+        },
+      },
+    });
+
+    const [result] = await svc.list(companyId, {});
+
+    expect(result?.latestActivitySummary).toMatchObject({
+      text: "Marked resumed from waiting on human",
+      action: "issue.updated",
+      actorType: "user",
+      actorId: "user-1",
+    });
+  });
+
+  it("keeps blocked to resumed workflow recovery as the latest meaningful activity after follow-up comments", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const orkAgentId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: orkAgentId,
+      companyId,
+      name: "Ork",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Resume the blocked integration slice",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: orkAgentId,
+      invocationSource: "manual",
+      status: "running",
+      contextSnapshot: { issueId },
+    });
+
+    await db.insert(activityLog).values([
+      {
+        companyId,
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+        runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-19T13:30:00.000Z"),
+        details: {
+          status: "blocked",
+          missionControl: {
+            workflowState: {
+              kind: "blocked_on_upstream",
+              enteredAt: "2026-04-19T13:30:00.000Z",
+            },
+          },
+          _previous: {
+            status: "todo",
+            missionControl: {
+              workflowState: null,
+            },
+          },
+        },
+      },
+      {
+        companyId,
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+        runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-19T14:00:00.000Z"),
+        details: {
+          status: "todo",
+          missionControl: {
+            workflowState: {
+              kind: "resumed",
+              enteredAt: "2026-04-19T14:00:00.000Z",
+              resumedFrom: "blocked_on_upstream",
+            },
+          },
+          _previous: {
+            status: "blocked",
+            missionControl: {
+              workflowState: {
+                kind: "blocked_on_upstream",
+                enteredAt: "2026-04-19T13:30:00.000Z",
+              },
+            },
+          },
+        },
+      },
+      {
+        companyId,
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+        runId,
+        action: "issue.comment_added",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-19T14:05:00.000Z"),
+        details: {
+          commentId: randomUUID(),
+          bodySnippet: "Resumed work is in progress again.",
+        },
+      },
+    ]);
+
+    const [result] = await svc.list(companyId, {});
+
+    expect(result?.latestActivitySummary).toMatchObject({
+      text: "Marked resumed from blocked on upstream",
+      action: "issue.updated",
+      actorType: "agent",
+      actorId: orkAgentId,
+      agentId: orkAgentId,
+    });
+    expect(result?.latestHandoffSummary).toBeNull();
+  });
+
+  it("derives compact latest handoff summaries from structured handoff activity", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const mainAgentId = randomUUID();
+    const orkAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Hand the task to Ork",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(agents).values([
+      {
+        id: mainAgentId,
+        companyId,
+        name: "Main",
+        role: "coordinator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: orkAgentId,
+        companyId,
+        name: "Ork",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "agent",
+      actorId: mainAgentId,
+      agentId: mainAgentId,
+      action: "issue.handoff_updated",
+      entityType: "issue",
+      entityId: issueId,
+      createdAt: new Date("2026-04-18T12:00:00.000Z"),
+      details: {
+        missionControl: {
+          handoff: {
+            fromAgentId: mainAgentId,
+            toAgentId: orkAgentId,
+            reason: "Engineering implementation",
+            requestedNextStep: "Take ownership",
+            unblockCondition: null,
+          },
+        },
+        _previous: {
+          missionControl: {
+            handoff: null,
+          },
+        },
+      },
+    });
+
+    const [result] = await svc.list(companyId, {});
+
+    expect(result?.latestHandoffSummary).toMatchObject({
+      text: "Created handoff",
+      action: "issue.handoff_updated",
+      actorType: "agent",
+      actorId: mainAgentId,
+      agentId: mainAgentId,
+    });
+  });
+
+  it("keeps reviewer changes out of the handoff summary lane", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Review the task",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "user",
+      actorId: "user-1",
+      action: "issue.reviewers_updated",
+      entityType: "issue",
+      entityId: issueId,
+      createdAt: new Date("2026-04-18T13:00:00.000Z"),
+      details: {
+        participants: [{ type: "agent", agentId: "agent-reviewer" }],
+      },
+    });
+
+    const [result] = await svc.list(companyId, {});
+
+    expect(result?.latestActivitySummary).toMatchObject({
+      text: "Updated reviewers",
+      action: "issue.reviewers_updated",
+      actorType: "user",
+      actorId: "user-1",
+    });
+    expect(result?.latestHandoffSummary).toBeNull();
+  });
+
+  it("keeps run-linked comment churn out of the latest activity summary lane when mission-control state changed more recently", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const orkAgentId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Wait for operator input",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(agents).values({
+      id: orkAgentId,
+      companyId,
+      name: "Ork",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: orkAgentId,
+      invocationSource: "manual",
+      status: "running",
+      contextSnapshot: { issueId },
+    });
+
+    await db.insert(activityLog).values([
+      {
+        companyId,
+        actorType: "user",
+        actorId: "user-1",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-18T14:00:00.000Z"),
+        details: {
+          missionControl: {
+            workflowState: {
+              kind: "waiting_on_human",
+              enteredAt: "2026-04-18T14:00:00.000Z",
+            },
+          },
+          _previous: {
+            missionControl: {
+              workflowState: null,
+            },
+          },
+        },
+      },
+      {
+        companyId,
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+        runId,
+        action: "issue.comment_added",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-18T14:05:00.000Z"),
+        details: {
+          commentId: randomUUID(),
+          bodySnippet: "Still waiting on the operator before continuing.",
+        },
+      },
+    ]);
+
+    const [result] = await svc.list(companyId, {});
+
+    expect(result?.latestActivitySummary).toMatchObject({
+      text: "Marked waiting on human",
+      action: "issue.updated",
+      actorType: "user",
+      actorId: "user-1",
+    });
+  });
+
+  it("keeps generic manual comments out of the latest activity summary lane when they add no structured control-plane signal", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Wait for operator input",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(activityLog).values([
+      {
+        companyId,
+        actorType: "user",
+        actorId: "user-1",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-18T14:00:00.000Z"),
+        details: {
+          missionControl: {
+            workflowState: {
+              kind: "waiting_on_human",
+              enteredAt: "2026-04-18T14:00:00.000Z",
+            },
+          },
+          _previous: {
+            missionControl: {
+              workflowState: null,
+            },
+          },
+        },
+      },
+      {
+        companyId,
+        actorType: "user",
+        actorId: "user-1",
+        action: "issue.comment_added",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-18T14:05:00.000Z"),
+        details: {
+          commentId: randomUUID(),
+          bodySnippet: "Please keep me posted once the operator responds.",
+        },
+      },
+    ]);
+
+    const [result] = await svc.list(companyId, {});
+
+    expect(result?.latestActivitySummary).toMatchObject({
+      text: "Marked waiting on human",
+      action: "issue.updated",
+      actorType: "user",
+      actorId: "user-1",
+    });
+  });
+
+  it("keeps realistic mission-control history compact when a handoff is followed by escalation and run chatter", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const mainAgentId = randomUUID();
+    const orkAgentId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Coordinate the next implementation slice",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(agents).values([
+      {
+        id: mainAgentId,
+        companyId,
+        name: "Main",
+        role: "coordinator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: orkAgentId,
+        companyId,
+        name: "Ork",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: orkAgentId,
+      invocationSource: "manual",
+      status: "running",
+      contextSnapshot: { issueId },
+    });
+
+    await db.insert(activityLog).values([
+      {
+        companyId,
+        actorType: "agent",
+        actorId: mainAgentId,
+        agentId: mainAgentId,
+        action: "issue.handoff_updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-18T15:00:00.000Z"),
+        details: {
+          missionControl: {
+            handoff: {
+              fromAgentId: mainAgentId,
+              toAgentId: orkAgentId,
+              reason: "Engineering implementation",
+              requestedNextStep: "Take ownership of the patch",
+              unblockCondition: "Patch is merged",
+            },
+          },
+          _previous: {
+            missionControl: {
+              handoff: null,
+            },
+          },
+        },
+      },
+      {
+        companyId,
+        actorType: "user",
+        actorId: "user-1",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-18T15:05:00.000Z"),
+        details: {
+          missionControl: {
+            needsHumanAttention: true,
+          },
+          _previous: {
+            missionControl: {
+              needsHumanAttention: false,
+            },
+          },
+        },
+      },
+      {
+        companyId,
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+        runId,
+        action: "issue.comment_added",
+        entityType: "issue",
+        entityId: issueId,
+        createdAt: new Date("2026-04-18T15:06:00.000Z"),
+        details: {
+          commentId: randomUUID(),
+          bodySnippet: "Working through the patch now; I will update once the operator reviews it.",
+        },
+      },
+    ]);
+
+    const [result] = await svc.list(companyId, {});
+
+    expect(result?.latestActivitySummary).toMatchObject({
+      text: "Marked needs human attention",
+      action: "issue.updated",
+      actorType: "user",
+      actorId: "user-1",
+    });
+    expect(result?.latestHandoffSummary).toMatchObject({
+      text: "Created handoff",
+      action: "issue.handoff_updated",
+      actorType: "agent",
+      actorId: mainAgentId,
+      agentId: mainAgentId,
+    });
+  });
+
+  it("records operator-visible history when Personal OS reroutes implementation work to Ork", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const personalOsAgentId = randomUUID();
+    const orkAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: personalOsAgentId,
+        companyId,
+        name: "Personal OS",
+        role: "operator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: orkAgentId,
+        companyId,
+        name: "Ork",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Implement the mission-control operator queue refinement",
+      status: "todo",
+      priority: "high",
+      ownerAgentId: personalOsAgentId,
+      assigneeAgentId: personalOsAgentId,
+      missionControl: {
+        collaboratorAgentIds: [],
+        nextStep: "Clarify the operator follow-up",
+      },
+    });
+
+    const updatedIssue = await svc.updateWithActivity(issueId, {
+      ownerAgentId: orkAgentId,
+      assigneeAgentId: orkAgentId,
+      missionControl: {
+        collaboratorAgentIds: [personalOsAgentId],
+        nextStep: "Implement the operator queue refinement and report verification results.",
+        workflowState: {
+          kind: "handed_off",
+          enteredAt: "2026-04-19T09:00:00.000Z",
+        },
+        handoff: {
+          fromAgentId: personalOsAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering ownership is clear",
+          requestedNextStep: "Take over the implementation and verification slice.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          timestamp: "2026-04-19T09:00:00.000Z",
+        },
+      },
+    }, {
+      actorType: "agent",
+      actorId: personalOsAgentId,
+      agentId: personalOsAgentId,
+    });
+
+    expect(updatedIssue).toMatchObject({
+      id: issueId,
+      ownerAgentId: orkAgentId,
+      assigneeAgentId: orkAgentId,
+      missionControl: {
+        collaboratorAgentIds: [personalOsAgentId],
+        nextStep: "Implement the operator queue refinement and report verification results.",
+        workflowState: {
+          kind: "handed_off",
+        },
+        handoff: {
+          fromAgentId: personalOsAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering ownership is clear",
+          requestedNextStep: "Take over the implementation and verification slice.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          context: {
+            issueId,
+            title: "Implement the mission-control operator queue refinement",
+          },
+        },
+      },
+    });
+
+    const [listedIssue] = await svc.list(companyId, {});
+    const activityEntries = await db
+      .select({
+        action: activityLog.action,
+        actorId: activityLog.actorId,
+        agentId: activityLog.agentId,
+      })
+      .from(activityLog)
+      .where(eq(activityLog.entityId, issueId))
+      .orderBy(activityLog.createdAt);
+
+    expect(listedIssue).toMatchObject({
+      id: issueId,
+      ownerAgentId: orkAgentId,
+      assigneeAgentId: orkAgentId,
+      latestActivitySummary: {
+        text: "Created handoff",
+        action: "issue.handoff_updated",
+        actorType: "agent",
+        actorId: personalOsAgentId,
+        agentId: personalOsAgentId,
+      },
+      latestHandoffSummary: {
+        text: "Created handoff",
+        action: "issue.handoff_updated",
+        actorType: "agent",
+        actorId: personalOsAgentId,
+        agentId: personalOsAgentId,
+      },
+    });
+    expect(activityEntries).toEqual([
+      {
+        action: "issue.updated",
+        actorId: personalOsAgentId,
+        agentId: personalOsAgentId,
+      },
+      {
+        action: "issue.handoff_updated",
+        actorId: personalOsAgentId,
+        agentId: personalOsAgentId,
+      },
+    ]);
+  });
+
+  it("proves a tracked Main to Ork dry run stays operator-readable without rereading transcript chatter", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const mainAgentId = randomUUID();
+    const orkAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values([
+      {
+        id: mainAgentId,
+        companyId,
+        name: "Main",
+        role: "coordinator",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: orkAgentId,
+        companyId,
+        name: "Ork",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Validate mission-control dry-run usability for tracked engineering work",
+      status: "todo",
+      priority: "high",
+      ownerAgentId: mainAgentId,
+      assigneeAgentId: mainAgentId,
+      missionControl: {
+        collaboratorAgentIds: [],
+        nextStep: "Main decides which specialist owns the next implementation slice.",
+      },
+    });
+
+    await svc.updateWithActivity(issueId, {
+      ownerAgentId: orkAgentId,
+      assigneeAgentId: orkAgentId,
+      missionControl: {
+        collaboratorAgentIds: [mainAgentId],
+        nextStep: "Implement the dry-run validation and report targeted verification.",
+        workflowState: {
+          kind: "handed_off",
+          enteredAt: "2026-04-19T10:00:00.000Z",
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering execution is now clear",
+          requestedNextStep: "Take ownership of the implementation slice and report back with evidence.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          timestamp: "2026-04-19T10:00:00.000Z",
+        },
+      },
+    }, {
+      actorType: "agent",
+      actorId: mainAgentId,
+      agentId: mainAgentId,
+    });
+
+    await svc.addComment(
+      issueId,
+      "Routing this to Ork for the engineering dry run.",
+      { agentId: mainAgentId },
+    );
+
+    await svc.updateWithActivity(issueId, {
+      status: "blocked",
+      missionControl: {
+        collaboratorAgentIds: [mainAgentId],
+        nextStep: "Wait for the upstream API fix, then resume verification and report the result.",
+        blocker: "External API credentials are still failing in the target environment.",
+        workflowState: {
+          kind: "blocked_on_upstream",
+          enteredAt: "2026-04-19T10:30:00.000Z",
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering execution is now clear",
+          requestedNextStep: "Take ownership of the implementation slice and report back with evidence.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          timestamp: "2026-04-19T10:00:00.000Z",
+        },
+      },
+    }, {
+      actorType: "agent",
+      actorId: orkAgentId,
+      agentId: orkAgentId,
+    });
+
+    await svc.addComment(
+      issueId,
+      "Still blocked on the upstream API even though the owner and next step are already structured.",
+      { agentId: orkAgentId },
+    );
+
+    await svc.updateWithActivity(issueId, {
+      status: "todo",
+      missionControl: {
+        collaboratorAgentIds: [mainAgentId],
+        nextStep: "Resume the dry-run verification, capture the result, and report back to the operator.",
+        blocker: null,
+        workflowState: {
+          kind: "resumed",
+          resumedFrom: "blocked_on_upstream",
+          enteredAt: "2026-04-19T11:00:00.000Z",
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering execution is now clear",
+          requestedNextStep: "Take ownership of the implementation slice and report back with evidence.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          timestamp: "2026-04-19T10:00:00.000Z",
+        },
+      },
+    }, {
+      actorType: "agent",
+      actorId: orkAgentId,
+      agentId: orkAgentId,
+    });
+
+    await svc.addComment(
+      issueId,
+      "Verification is resumed; transcript chatter should not replace the structured mission-control summary.",
+      { agentId: orkAgentId },
+    );
+
+    const [listedIssue] = await svc.list(companyId, {});
+
+    expect(listedIssue).toMatchObject({
+      id: issueId,
+      ownerAgentId: orkAgentId,
+      assigneeAgentId: orkAgentId,
+      status: "todo",
+      missionControl: {
+        nextStep: "Resume the dry-run verification, capture the result, and report back to the operator.",
+        blocker: null,
+        workflowState: {
+          kind: "resumed",
+          resumedFrom: "blocked_on_upstream",
+        },
+        handoff: {
+          fromAgentId: mainAgentId,
+          toAgentId: orkAgentId,
+          reason: "Engineering execution is now clear",
+          requestedNextStep: "Take ownership of the implementation slice and report back with evidence.",
+          unblockCondition: "Patch and targeted verification are complete.",
+          context: {
+            issueId,
+            title: "Validate mission-control dry-run usability for tracked engineering work",
+          },
+        },
+      },
+      latestActivitySummary: {
+        text: "Marked resumed from blocked on upstream",
+        action: "issue.updated",
+        actorType: "agent",
+        actorId: orkAgentId,
+        agentId: orkAgentId,
+      },
+      latestHandoffSummary: {
+        text: "Created handoff",
+        action: "issue.handoff_updated",
+        actorType: "agent",
+        actorId: mainAgentId,
+        agentId: mainAgentId,
+      },
+    });
+
+    const comments = await svc.listComments(issueId);
+    const summary = buildTelegramMissionControlSummary({
+      issue: listedIssue!,
+      comments,
+      mode: "summary",
+      agentLabels: {
+        [mainAgentId]: "Main",
+        [orkAgentId]: "Ork",
+      },
+    });
+    const transparent = buildTelegramMissionControlSummary({
+      issue: listedIssue!,
+      comments,
+      mode: "transparent",
+      agentLabels: {
+        [mainAgentId]: "Main",
+        [orkAgentId]: "Ork",
+      },
+      maxTransparentComments: 2,
+    });
+
+    expect(summary).toEqual({
+      lines: [
+        "Owner: Ork",
+        "State: resumed",
+        "Next: Resume the dry-run verification, capture the result, and report back to the operator.",
+        "Handoff: Main -> Ork",
+        "Latest: Marked resumed from blocked on upstream",
+      ],
+      supportingNarration: [],
+    });
+    expect(transparent).toEqual({
+      lines: summary.lines,
+      supportingNarration: [
+        "Still blocked on the upstream API even though the owner and next step are already structured.",
+        "Verification is resumed; transcript chatter should not replace the structured mission-control summary.",
+      ],
+    });
   });
 
   it("trims list payload fields that can grow large on issue index routes", async () => {
@@ -1490,6 +2473,120 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(followUp.executionWorkspaceSettings).toEqual({
       mode: "operator_branch",
     });
+  });
+});
+
+describeEmbeddedPostgres("issueService.create default assignee fallback", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-create-default-assignee-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+    await ensureIssueRelationsTable(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(issueRelations);
+    await db.delete(issueInboxArchives);
+    await db.delete(activityLog);
+    await db.delete(heartbeatRuns);
+    await db.delete(companyMemberships);
+    await db.delete(issues);
+    await db.delete(executionWorkspaces);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("applies the provided default assignee user when no explicit assignee was supplied", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const creatorAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: creatorAgentId,
+      companyId,
+      name: "Creator",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: "user-1",
+      status: "active",
+    });
+
+    const created = await svc.create(companyId, {
+      title: "Child issue",
+      defaultAssigneeUserId: "user-1",
+      createdByAgentId: creatorAgentId,
+    });
+
+    expect(created.assigneeAgentId).toBeNull();
+    expect(created.assigneeUserId).toBe("user-1");
+  });
+
+  it("does not override an explicit assignee with the default user fallback", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "Assignee",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const creatorAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: creatorAgentId,
+      companyId,
+      name: "Creator",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const created = await svc.create(companyId, {
+      title: "Child issue",
+      assigneeAgentId,
+      defaultAssigneeUserId: "user-1",
+      createdByAgentId: creatorAgentId,
+    });
+
+    expect(created.assigneeAgentId).toBe(assigneeAgentId);
+    expect(created.assigneeUserId).toBeNull();
   });
 });
 

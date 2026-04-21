@@ -31,6 +31,7 @@ export const issues = pgTable(
     description: text("description"),
     status: text("status").notNull().default("backlog"),
     priority: text("priority").notNull().default("medium"),
+    ownerAgentId: uuid("owner_agent_id").references(() => agents.id),
     assigneeAgentId: uuid("assignee_agent_id").references(() => agents.id),
     assigneeUserId: text("assignee_user_id"),
     checkoutRunId: uuid("checkout_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
@@ -53,6 +54,7 @@ export const issues = pgTable(
       .references((): AnyPgColumn => executionWorkspaces.id, { onDelete: "set null" }),
     executionWorkspacePreference: text("execution_workspace_preference"),
     executionWorkspaceSettings: jsonb("execution_workspace_settings").$type<Record<string, unknown>>(),
+    missionControl: jsonb("mission_control").$type<Record<string, unknown>>(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
@@ -65,6 +67,11 @@ export const issues = pgTable(
     assigneeStatusIdx: index("issues_company_assignee_status_idx").on(
       table.companyId,
       table.assigneeAgentId,
+      table.status,
+    ),
+    ownerStatusIdx: index("issues_company_owner_status_idx").on(
+      table.companyId,
+      table.ownerAgentId,
       table.status,
     ),
     assigneeUserStatusIdx: index("issues_company_assignee_user_status_idx").on(

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { pickTextColorForPillBg } from "@/lib/color-contrast";
 import { Link } from "@/lib/router";
-import type { Issue } from "@paperclipai/shared";
+import type { Issue, IssueMissionControlWorkflowStateKind } from "@paperclipai/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { accessApi } from "../api/access";
 import { agentsApi } from "../api/agents";
@@ -15,6 +15,8 @@ import { useProjectOrder } from "../hooks/useProjectOrder";
 import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import { buildExecutionPolicy, stageParticipantValues } from "../lib/issue-execution-policy";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
 import { Identity } from "./Identity";
@@ -72,6 +74,36 @@ function defaultExecutionWorkspaceModeForProject(project: { executionWorkspacePo
   return "shared_workspace";
 }
 
+const MISSION_CONTROL_WORKFLOW_OPTIONS: Array<{
+  kind: IssueMissionControlWorkflowStateKind;
+  label: string;
+}> = [
+  { kind: "waiting_on_human", label: "Waiting on human" },
+  { kind: "blocked_on_upstream", label: "Blocked on upstream" },
+  { kind: "handed_off", label: "Handed off" },
+  { kind: "resumed", label: "Resumed" },
+];
+
+const RESUMED_FROM_OPTIONS: Array<{
+  kind: Exclude<IssueMissionControlWorkflowStateKind, "resumed">;
+  label: string;
+}> = [
+  { kind: "waiting_on_human", label: "Waiting on human" },
+  { kind: "blocked_on_upstream", label: "Blocked on upstream" },
+  { kind: "handed_off", label: "Handed off" },
+];
+
+function workflowStateLabel(kind: IssueMissionControlWorkflowStateKind | null | undefined) {
+  return MISSION_CONTROL_WORKFLOW_OPTIONS.find((option) => option.kind === kind)?.label ?? "No workflow state";
+}
+
+const OPERATOR_CONTROL_BUTTON_CLASS =
+  "inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground";
+
+function hasStructuredHandoff(handoff: Issue["missionControl"] extends { handoff?: infer THandoff } ? THandoff : unknown) {
+  return Boolean(handoff);
+}
+
 interface IssuePropertiesProps {
   issue: Issue;
   childIssues?: Issue[];
@@ -86,6 +118,53 @@ function PropertyRow({ label, children }: { label: string; children: React.React
       <span className="text-xs text-muted-foreground shrink-0 w-20 mt-0.5">{label}</span>
       <div className="flex items-center gap-1.5 min-w-0 flex-1 flex-wrap">{children}</div>
     </div>
+  );
+}
+
+function MissionControlTextField({
+  label,
+  value,
+  placeholder,
+  multiline = false,
+  onCommit,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  multiline?: boolean;
+  onCommit: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  const commit = useCallback(() => {
+    if (draft === value) return;
+    onCommit(draft.trim());
+  }, [draft, onCommit, value]);
+
+  return (
+    <PropertyRow label={label}>
+      {multiline ? (
+        <Textarea
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          placeholder={placeholder}
+          className="min-h-[72px] text-sm"
+        />
+      ) : (
+        <Input
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          placeholder={placeholder}
+          className="h-8 text-sm"
+        />
+      )}
+    </PropertyRow>
   );
 }
 
@@ -163,6 +242,16 @@ export function IssueProperties({
   const companyId = issue.companyId ?? selectedCompanyId;
   const [assigneeOpen, setAssigneeOpen] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState("");
+  const [ownerOpen, setOwnerOpen] = useState(false);
+  const [ownerSearch, setOwnerSearch] = useState("");
+  const [collaboratorsOpen, setCollaboratorsOpen] = useState(false);
+  const [collaboratorsSearch, setCollaboratorsSearch] = useState("");
+  const [workflowStateOpen, setWorkflowStateOpen] = useState(false);
+  const [resumedFromOpen, setResumedFromOpen] = useState(false);
+  const [handoffFromOpen, setHandoffFromOpen] = useState(false);
+  const [handoffFromSearch, setHandoffFromSearch] = useState("");
+  const [handoffToOpen, setHandoffToOpen] = useState(false);
+  const [handoffToSearch, setHandoffToSearch] = useState("");
   const [projectOpen, setProjectOpen] = useState(false);
   const [projectSearch, setProjectSearch] = useState("");
   const [blockedByOpen, setBlockedByOpen] = useState(false);
@@ -253,6 +342,7 @@ export function IssueProperties({
   const currentProject = issue.projectId
     ? orderedProjects.find((project) => project.id === issue.projectId) ?? null
     : null;
+  const missionControl = issue.missionControl ?? null;
   const projectLink = (id: string | null) => {
     if (!id) return null;
     const project = projects?.find((p) => p.id === id) ?? null;
@@ -276,11 +366,152 @@ export function IssueProperties({
   const assignee = issue.assigneeAgentId
     ? agents?.find((a) => a.id === issue.assigneeAgentId)
     : null;
+  const owner = issue.ownerAgentId
+    ? agents?.find((a) => a.id === issue.ownerAgentId)
+    : null;
+  const collaboratorAgentIds = missionControl?.collaboratorAgentIds ?? [];
+  const workflowState = missionControl?.workflowState ?? null;
+  const handoff = missionControl?.handoff ?? null;
   const reviewerValues = stageParticipantValues(issue.executionPolicy, "review");
   const approverValues = stageParticipantValues(issue.executionPolicy, "approval");
   const userLabel = (userId: string | null | undefined) => formatAssigneeUserLabel(userId, currentUserId, userLabelMap);
   const assigneeUserLabel = userLabel(issue.assigneeUserId);
   const creatorUserLabel = userLabel(issue.createdByUserId);
+  const activityActorLabel = (summary: NonNullable<Issue["latestActivitySummary"] | Issue["latestHandoffSummary"]>) => {
+    if (summary.actorType === "agent") {
+      return agentName(summary.agentId ?? summary.actorId) ?? summary.actorId.slice(0, 8);
+    }
+    if (summary.actorType === "user") {
+      return userLabel(summary.userId ?? summary.actorId) ?? "User";
+    }
+    return "System";
+  };
+  const updateHandoff = (patch: Record<string, unknown>) => {
+    const nextHandoff = {
+      ...(handoff ?? {}),
+      ...patch,
+      timestamp: patch.timestamp ?? handoff?.timestamp ?? new Date(),
+    };
+    onUpdate({
+      missionControl: {
+        ...(missionControl ?? {}),
+        handoff: nextHandoff,
+      },
+    });
+  };
+  const updateOwner = (ownerAgentId: string | null) => {
+    const nextCollaboratorAgentIds = collaboratorAgentIds.filter((agentId) => agentId !== ownerAgentId);
+    onUpdate({
+      ownerAgentId,
+      missionControl: {
+        ...(missionControl ?? {}),
+        collaboratorAgentIds: nextCollaboratorAgentIds,
+      },
+    });
+  };
+  const setWorkflowState = (kind: IssueMissionControlWorkflowStateKind | null) => {
+    onUpdate({
+      missionControl: {
+        ...(missionControl ?? {}),
+        workflowState: kind
+          ? {
+              kind,
+              enteredAt: new Date(),
+              ...(kind === "resumed"
+                ? { resumedFrom: workflowState?.resumedFrom ?? "handed_off" }
+                : {}),
+            }
+          : null,
+      },
+    });
+  };
+  const setWorkflowResumedFrom = (kind: Exclude<IssueMissionControlWorkflowStateKind, "resumed">) => {
+    onUpdate({
+      missionControl: {
+        ...(missionControl ?? {}),
+        workflowState: {
+          kind: "resumed",
+          enteredAt: workflowState?.enteredAt ?? new Date(),
+          resumedFrom: kind,
+        },
+      },
+    });
+  };
+  const applyOperatorControl = (
+    action: "mark_waiting" | "mark_blocked_on_upstream" | "escalate" | "resume" | "resolve_handoff" | "reassign_owner"
+  ) => {
+    if (action === "reassign_owner") {
+      if (!handoff?.toAgentId || handoff.toAgentId === issue.ownerAgentId) return;
+      updateOwner(handoff.toAgentId);
+      return;
+    }
+
+    if (action === "mark_waiting") {
+      onUpdate({
+        missionControl: {
+          ...(missionControl ?? {}),
+          needsHumanAttention: true,
+          workflowState: {
+            kind: "waiting_on_human",
+            enteredAt: new Date(),
+          },
+        },
+      });
+      return;
+    }
+
+    if (action === "mark_blocked_on_upstream") {
+      onUpdate({
+        status: "blocked",
+        missionControl: {
+          ...(missionControl ?? {}),
+          workflowState: {
+            kind: "blocked_on_upstream",
+            enteredAt: new Date(),
+          },
+        },
+      });
+      return;
+    }
+
+    if (action === "escalate") {
+      onUpdate({
+        missionControl: {
+          ...(missionControl ?? {}),
+          needsHumanAttention: true,
+        },
+      });
+      return;
+    }
+
+    if (action === "resolve_handoff") {
+      onUpdate({
+        missionControl: {
+          ...(missionControl ?? {}),
+          handoff: null,
+          workflowState: workflowState?.kind === "handed_off" ? null : workflowState,
+        },
+      });
+      return;
+    }
+
+    onUpdate({
+      missionControl: {
+        ...(missionControl ?? {}),
+        workflowState: {
+          kind: "resumed",
+          enteredAt: new Date(),
+          resumedFrom:
+            workflowState?.kind && workflowState.kind !== "resumed"
+              ? workflowState.kind
+              : workflowState?.resumedFrom ?? "handed_off",
+        },
+      },
+    });
+  };
+  const filteredHandoffAgents = (search: string) => sortedAgents.filter((candidate) =>
+    candidate.name.toLowerCase().includes(search.toLowerCase()),
+  );
   const updateExecutionPolicy = (nextReviewers: string[], nextApprovers: string[]) => {
     onUpdate({
       executionPolicy: buildExecutionPolicy({
@@ -462,6 +693,116 @@ export function IssueProperties({
     <>
       <User className="h-3.5 w-3.5 text-muted-foreground" />
       <span className="text-sm text-muted-foreground">Unassigned</span>
+    </>
+  );
+
+  const ownerTrigger = owner ? (
+    <Identity name={owner.name} size="sm" />
+  ) : (
+    <>
+      <User className="h-3.5 w-3.5 text-muted-foreground" />
+      <span className="text-sm text-muted-foreground">No owner</span>
+    </>
+  );
+
+  const ownerContent = (
+    <>
+      <input
+        className="w-full px-2 py-1.5 text-xs bg-transparent outline-none border-b border-border mb-1 placeholder:text-muted-foreground/50"
+        placeholder="Search owners..."
+        value={ownerSearch}
+        onChange={(e) => setOwnerSearch(e.target.value)}
+        autoFocus={!inline}
+      />
+      <div className="max-h-48 overflow-y-auto overscroll-contain">
+        <button
+          className={cn(
+            "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50",
+            !issue.ownerAgentId && "bg-accent",
+          )}
+          onClick={() => {
+            updateOwner(null);
+            setOwnerOpen(false);
+          }}
+        >
+          No owner
+        </button>
+        {sortedAgents
+          .filter((a) => {
+            if (!ownerSearch.trim()) return true;
+            return a.name.toLowerCase().includes(ownerSearch.toLowerCase());
+          })
+          .map((a) => (
+            <button
+              key={a.id}
+              className={cn(
+                "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50",
+                issue.ownerAgentId === a.id && "bg-accent",
+              )}
+              onClick={() => {
+                updateOwner(a.id);
+                setOwnerOpen(false);
+              }}
+            >
+              <Identity name={a.name} size="sm" />
+            </button>
+          ))}
+      </div>
+    </>
+  );
+
+  const collaboratorsTrigger = collaboratorAgentIds.length > 0 ? (
+    <span className="text-sm break-words min-w-0">
+      {collaboratorAgentIds.map((agentId) => agentName(agentId) ?? agentId.slice(0, 8)).join(", ")}
+    </span>
+  ) : (
+    <span className="text-sm text-muted-foreground">None</span>
+  );
+
+  const toggleCollaborator = (agentId: string) => {
+    const nextCollaboratorAgentIds = collaboratorAgentIds.includes(agentId)
+      ? collaboratorAgentIds.filter((id) => id !== agentId)
+      : [...collaboratorAgentIds, agentId];
+    onUpdate({
+      missionControl: {
+        ...(missionControl ?? {}),
+        collaboratorAgentIds: nextCollaboratorAgentIds,
+      },
+    });
+  };
+
+  const collaboratorsContent = (
+    <>
+      <input
+        className="w-full px-2 py-1.5 text-xs bg-transparent outline-none border-b border-border mb-1 placeholder:text-muted-foreground/50"
+        placeholder="Search collaborators..."
+        value={collaboratorsSearch}
+        onChange={(e) => setCollaboratorsSearch(e.target.value)}
+        autoFocus={!inline}
+      />
+      <div className="max-h-48 overflow-y-auto overscroll-contain">
+        {sortedAgents
+          .filter((a) => a.id !== issue.ownerAgentId)
+          .filter((a) => {
+            if (!collaboratorsSearch.trim()) return true;
+            return a.name.toLowerCase().includes(collaboratorsSearch.toLowerCase());
+          })
+          .map((a) => {
+            const selected = collaboratorAgentIds.includes(a.id);
+            return (
+              <button
+                key={a.id}
+                className={cn(
+                  "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50",
+                  selected && "bg-accent",
+                )}
+                onClick={() => toggleCollaborator(a.id)}
+              >
+                <Identity name={a.name} size="sm" />
+              </button>
+            );
+          })}
+      </div>
     </>
   );
 
@@ -974,6 +1315,38 @@ export function IssueProperties({
 
         <PropertyPicker
           inline={inline}
+          label="Owner"
+          open={ownerOpen}
+          onOpenChange={(open) => { setOwnerOpen(open); if (!open) setOwnerSearch(""); }}
+          triggerContent={ownerTrigger}
+          popoverClassName="w-52"
+          extra={issue.ownerAgentId ? (
+            <Link
+              to={`/agents/${issue.ownerAgentId}`}
+              className="inline-flex items-center justify-center h-5 w-5 rounded hover:bg-accent/50 transition-colors text-muted-foreground hover:text-foreground"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <ArrowUpRight className="h-3 w-3" />
+            </Link>
+          ) : undefined}
+        >
+          {ownerContent}
+        </PropertyPicker>
+
+        <PropertyPicker
+          inline={inline}
+          label="Collaborators"
+          open={collaboratorsOpen}
+          onOpenChange={(open) => { setCollaboratorsOpen(open); if (!open) setCollaboratorsSearch(""); }}
+          triggerContent={collaboratorsTrigger}
+          triggerClassName="min-w-0 max-w-full"
+          popoverClassName="w-56"
+        >
+          {collaboratorsContent}
+        </PropertyPicker>
+
+        <PropertyPicker
+          inline={inline}
           label="Project"
           open={projectOpen}
           onOpenChange={(open) => { setProjectOpen(open); if (!open) setProjectSearch(""); }}
@@ -1023,6 +1396,248 @@ export function IssueProperties({
         >
           {blockedByContent}
         </PropertyPicker>
+
+        <PropertyPicker
+          inline={inline}
+          label="Workflow"
+          open={workflowStateOpen}
+          onOpenChange={setWorkflowStateOpen}
+          triggerContent={<span className={cn("text-sm", !workflowState && "text-muted-foreground")}>{workflowStateLabel(workflowState?.kind)}</span>}
+          popoverClassName="w-64"
+        >
+          <div className="space-y-1 p-1">
+            <button
+              className={cn(
+                "flex w-full items-center rounded px-2 py-1.5 text-sm hover:bg-accent",
+                !workflowState && "bg-accent",
+              )}
+              onClick={() => {
+                setWorkflowState(null);
+                setWorkflowStateOpen(false);
+              }}
+            >
+              No workflow state
+            </button>
+            {MISSION_CONTROL_WORKFLOW_OPTIONS.map((option) => (
+              <button
+                key={option.kind}
+                className={cn(
+                  "flex w-full items-center rounded px-2 py-1.5 text-sm hover:bg-accent",
+                  workflowState?.kind === option.kind && "bg-accent",
+                )}
+                onClick={() => {
+                  setWorkflowState(option.kind);
+                  setWorkflowStateOpen(false);
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </PropertyPicker>
+
+        <PropertyRow label="Controls">
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              className={OPERATOR_CONTROL_BUTTON_CLASS}
+              onClick={() => applyOperatorControl("mark_waiting")}
+            >
+              Mark waiting
+            </button>
+            <button
+              type="button"
+              className={OPERATOR_CONTROL_BUTTON_CLASS}
+              onClick={() => applyOperatorControl("mark_blocked_on_upstream")}
+            >
+              Mark blocked on upstream
+            </button>
+            <button
+              type="button"
+              className={OPERATOR_CONTROL_BUTTON_CLASS}
+              onClick={() => applyOperatorControl("escalate")}
+            >
+              Escalate
+            </button>
+            {handoff?.toAgentId && handoff.toAgentId !== issue.ownerAgentId ? (
+              <button
+                type="button"
+                className={OPERATOR_CONTROL_BUTTON_CLASS}
+                onClick={() => applyOperatorControl("reassign_owner")}
+              >
+                Reassign owner to {agentName(handoff.toAgentId) ?? "handoff target"}
+              </button>
+            ) : null}
+            {workflowState && workflowState.kind !== "resumed" ? (
+              <button
+                type="button"
+                className={OPERATOR_CONTROL_BUTTON_CLASS}
+                onClick={() => applyOperatorControl("resume")}
+              >
+                Resume
+              </button>
+            ) : null}
+            {hasStructuredHandoff(handoff) || workflowState?.kind === "handed_off" ? (
+              <button
+                type="button"
+                className={OPERATOR_CONTROL_BUTTON_CLASS}
+                onClick={() => applyOperatorControl("resolve_handoff")}
+              >
+                Resolve handoff
+              </button>
+            ) : null}
+          </div>
+        </PropertyRow>
+
+        {workflowState?.kind === "resumed" ? (
+          <PropertyPicker
+            inline={inline}
+            label="Resumed from"
+            open={resumedFromOpen}
+            onOpenChange={setResumedFromOpen}
+            triggerContent={<span className="text-sm">{workflowStateLabel(workflowState.resumedFrom ?? null)}</span>}
+            popoverClassName="w-64"
+          >
+            <div className="space-y-1 p-1">
+              {RESUMED_FROM_OPTIONS.map((option) => (
+                <button
+                  key={option.kind}
+                  className={cn(
+                    "flex w-full items-center rounded px-2 py-1.5 text-sm hover:bg-accent",
+                    workflowState.resumedFrom === option.kind && "bg-accent",
+                  )}
+                  onClick={() => {
+                    setWorkflowResumedFrom(option.kind);
+                    setResumedFromOpen(false);
+                  }}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </PropertyPicker>
+        ) : null}
+
+        <MissionControlTextField
+          label="Source"
+          value={missionControl?.sourceOfTruthPath ?? ""}
+          placeholder="Source-of-truth path"
+          onCommit={(value) => onUpdate({
+            missionControl: {
+              ...(missionControl ?? {}),
+              sourceOfTruthPath: value || null,
+            },
+          })}
+        />
+
+        <MissionControlTextField
+          label="Next"
+          value={missionControl?.nextStep ?? ""}
+          placeholder="Next step"
+          onCommit={(value) => onUpdate({
+            missionControl: {
+              ...(missionControl ?? {}),
+              nextStep: value || null,
+            },
+          })}
+        />
+
+        <MissionControlTextField
+          label="Blocker"
+          value={missionControl?.blocker ?? ""}
+          placeholder="Current blocker or none"
+          multiline
+          onCommit={(value) => onUpdate({
+            missionControl: {
+              ...(missionControl ?? {}),
+              blocker: value || null,
+            },
+          })}
+        />
+
+        <PropertyPicker
+          inline={inline}
+          label="Handoff from"
+          open={handoffFromOpen}
+          onOpenChange={(open) => {
+            setHandoffFromOpen(open);
+            if (!open) setHandoffFromSearch("");
+          }}
+          triggerContent={<span className="text-sm">{agentName(handoff?.fromAgentId ?? null) ?? "Unassigned"}</span>}
+          popoverClassName="w-72"
+        >
+          <div className="p-1 space-y-1">
+            <Input value={handoffFromSearch} onChange={(event) => setHandoffFromSearch(event.target.value)} placeholder="Search agents" className="h-8 text-sm" />
+            <button className="flex w-full items-center rounded px-2 py-1.5 text-sm hover:bg-accent" onClick={() => { updateHandoff({ fromAgentId: null }); setHandoffFromOpen(false); }}>Unassigned</button>
+            {filteredHandoffAgents(handoffFromSearch).map((agent) => (
+              <button key={agent.id} className="flex w-full items-center rounded px-2 py-1.5 text-sm hover:bg-accent" onClick={() => { updateHandoff({ fromAgentId: agent.id }); setHandoffFromOpen(false); }}>
+                {agent.name}
+              </button>
+            ))}
+          </div>
+        </PropertyPicker>
+
+        <PropertyPicker
+          inline={inline}
+          label="Handoff to"
+          open={handoffToOpen}
+          onOpenChange={(open) => {
+            setHandoffToOpen(open);
+            if (!open) setHandoffToSearch("");
+          }}
+          triggerContent={<span className="text-sm">{agentName(handoff?.toAgentId ?? null) ?? "Unassigned"}</span>}
+          popoverClassName="w-72"
+        >
+          <div className="p-1 space-y-1">
+            <Input value={handoffToSearch} onChange={(event) => setHandoffToSearch(event.target.value)} placeholder="Search agents" className="h-8 text-sm" />
+            <button className="flex w-full items-center rounded px-2 py-1.5 text-sm hover:bg-accent" onClick={() => { updateHandoff({ toAgentId: null }); setHandoffToOpen(false); }}>Unassigned</button>
+            {filteredHandoffAgents(handoffToSearch).map((agent) => (
+              <button key={agent.id} className="flex w-full items-center rounded px-2 py-1.5 text-sm hover:bg-accent" onClick={() => { updateHandoff({ toAgentId: agent.id }); setHandoffToOpen(false); }}>
+                {agent.name}
+              </button>
+            ))}
+          </div>
+        </PropertyPicker>
+
+        <MissionControlTextField
+          label="Handoff why"
+          value={handoff?.reason ?? ""}
+          placeholder="Reason for handoff"
+          multiline
+          onCommit={(value) => updateHandoff({ reason: value || null })}
+        />
+
+        <MissionControlTextField
+          label="Requested"
+          value={handoff?.requestedNextStep ?? ""}
+          placeholder="Requested next step"
+          multiline
+          onCommit={(value) => updateHandoff({ requestedNextStep: value || null })}
+        />
+
+        <MissionControlTextField
+          label="Unblock when"
+          value={handoff?.unblockCondition ?? ""}
+          placeholder="What unblocks this handoff"
+          multiline
+          onCommit={(value) => updateHandoff({ unblockCondition: value || null })}
+        />
+
+        <PropertyRow label="Attention">
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={missionControl?.needsHumanAttention ?? false}
+              onChange={(event) => onUpdate({
+                missionControl: {
+                  ...(missionControl ?? {}),
+                  needsHumanAttention: event.target.checked,
+                },
+              })}
+            />
+            Needs human attention
+          </label>
+        </PropertyRow>
 
         <PropertyRow label="Blocking">
           {blockingIssues.length > 0 ? (
@@ -1188,6 +1803,22 @@ export function IssueProperties({
         <PropertyRow label="Updated">
           <span className="text-sm">{timeAgo(issue.updatedAt)}</span>
         </PropertyRow>
+        {issue.latestActivitySummary ? (
+          <PropertyRow label="Activity">
+            <span className="text-sm">
+              {issue.latestActivitySummary.text}
+              <span className="text-muted-foreground">, {activityActorLabel(issue.latestActivitySummary)}, {timeAgo(issue.latestActivitySummary.createdAt)}</span>
+            </span>
+          </PropertyRow>
+        ) : null}
+        {issue.latestHandoffSummary ? (
+          <PropertyRow label="Handoff">
+            <span className="text-sm">
+              {issue.latestHandoffSummary.text}
+              <span className="text-muted-foreground">, {activityActorLabel(issue.latestHandoffSummary)}, {timeAgo(issue.latestHandoffSummary.createdAt)}</span>
+            </span>
+          </PropertyRow>
+        ) : null}
       </div>
     </div>
   );

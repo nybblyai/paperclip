@@ -3,22 +3,30 @@ import type { Issue } from "@paperclipai/shared";
 export type IssueFilterState = {
   statuses: string[];
   priorities: string[];
+  owners: string[];
   assignees: string[];
   creators: string[];
   labels: string[];
   projects: string[];
   workspaces: string[];
+  needsHumanAttention: boolean;
+  blockedOrWaiting: boolean;
+  recentHandoffs: boolean;
   hideRoutineExecutions: boolean;
 };
 
 export const defaultIssueFilterState: IssueFilterState = {
   statuses: [],
   priorities: [],
+  owners: [],
   assignees: [],
   creators: [],
   labels: [],
   projects: [],
   workspaces: [],
+  needsHumanAttention: false,
+  blockedOrWaiting: false,
+  recentHandoffs: false,
   hideRoutineExecutions: false,
 };
 
@@ -54,11 +62,15 @@ export function normalizeIssueFilterState(value: unknown): IssueFilterState {
   return {
     statuses: normalizeIssueFilterValueArray(candidate.statuses),
     priorities: normalizeIssueFilterValueArray(candidate.priorities),
+    owners: normalizeIssueFilterValueArray(candidate.owners),
     assignees: normalizeIssueFilterValueArray(candidate.assignees),
     creators: normalizeIssueFilterValueArray(candidate.creators),
     labels: normalizeIssueFilterValueArray(candidate.labels),
     projects: normalizeIssueFilterValueArray(candidate.projects),
     workspaces: normalizeIssueFilterValueArray(candidate.workspaces),
+    needsHumanAttention: candidate.needsHumanAttention === true,
+    blockedOrWaiting: candidate.blockedOrWaiting === true,
+    recentHandoffs: candidate.recentHandoffs === true,
     hideRoutineExecutions: candidate.hideRoutineExecutions === true,
   };
 }
@@ -85,6 +97,9 @@ export function applyIssueFilters(
   }
   if (state.statuses.length > 0) result = result.filter((issue) => state.statuses.includes(issue.status));
   if (state.priorities.length > 0) result = result.filter((issue) => state.priorities.includes(issue.priority));
+  if (state.owners.length > 0) {
+    result = result.filter((issue) => issue.ownerAgentId != null && state.owners.includes(issue.ownerAgentId));
+  }
   if (state.assignees.length > 0) {
     result = result.filter((issue) => {
       for (const assignee of state.assignees) {
@@ -116,6 +131,20 @@ export function applyIssueFilters(
       return workspaceId != null && state.workspaces.includes(workspaceId);
     });
   }
+  if (state.needsHumanAttention) {
+    result = result.filter((issue) => issue.missionControl?.needsHumanAttention === true);
+  }
+  if (state.blockedOrWaiting) {
+    result = result.filter((issue) => {
+      const workflowStateKind = issue.missionControl?.workflowState?.kind ?? null;
+      return issue.status === "blocked"
+        || workflowStateKind === "waiting_on_human"
+        || workflowStateKind === "blocked_on_upstream";
+    });
+  }
+  if (state.recentHandoffs) {
+    result = result.filter((issue) => issue.latestHandoffSummary != null || issue.missionControl?.handoff != null);
+  }
   return result;
 }
 
@@ -126,11 +155,15 @@ export function countActiveIssueFilters(
   let count = 0;
   if (state.statuses.length > 0) count += 1;
   if (state.priorities.length > 0) count += 1;
+  if (state.owners.length > 0) count += 1;
   if (state.assignees.length > 0) count += 1;
   if (state.creators.length > 0) count += 1;
   if (state.labels.length > 0) count += 1;
   if (state.projects.length > 0) count += 1;
   if (state.workspaces.length > 0) count += 1;
+  if (state.needsHumanAttention) count += 1;
+  if (state.blockedOrWaiting) count += 1;
+  if (state.recentHandoffs) count += 1;
   if (enableRoutineVisibilityFilter && state.hideRoutineExecutions) count += 1;
   return count;
 }

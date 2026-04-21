@@ -137,11 +137,17 @@ import {
   saveLastInboxTab,
   shouldShowCompanyAlerts,
   shouldShowInboxSection,
+  sortIssuesByMostRecentActivity,
   type InboxGroupedSection,
   type InboxTab,
   type InboxWorkItem,
   type InboxWorkItemGroupBy,
 } from "../lib/inbox";
+import {
+  buildInboxOperationalViews,
+  filterOperationalQueueIssues,
+  getActiveInboxOperationalViewKey,
+} from "../lib/inbox-operational-views";
 import { useDismissedInboxAlerts, useInboxDismissals, useReadInboxItems } from "../hooks/useInboxBadge";
 
 export { InboxIssueMetaLeading, InboxIssueTrailingColumns } from "../components/IssueColumns";
@@ -909,13 +915,42 @@ export function Inbox() {
       return a.label.localeCompare(b.label);
     });
   }, [agents, currentUserId, mineIssues, touchedIssues]);
+  const operationalViews = useMemo(
+    () => buildInboxOperationalViews(agents, issueFilters.hideRoutineExecutions),
+    [agents, issueFilters.hideRoutineExecutions],
+  );
+  const missionControlOwnerAgents = useMemo(
+    () => operationalViews.filter((view) => view.key.startsWith("owner:")).map((view) => ({
+      id: view.key.slice("owner:".length),
+      name: view.label,
+    })),
+    [operationalViews],
+  );
+  const activeOperationalViewKey = useMemo(
+    () => getActiveInboxOperationalViewKey(issueFilters, operationalViews),
+    [issueFilters, operationalViews],
+  );
+  const visibleOperationalQueueIssues = useMemo(
+    () => {
+      const filtered = applyIssueFilters(
+        [...(issues ?? [])].sort(sortIssuesByMostRecentActivity).slice(0, 100),
+        issueFilters,
+        currentUserId,
+        true,
+      );
+      if (activeOperationalViewKey !== "operator_queue") return filtered;
+      return filterOperationalQueueIssues(filtered, missionControlOwnerAgents);
+    },
+    [activeOperationalViewKey, currentUserId, issueFilters, issues, missionControlOwnerAgents],
+  );
   const issuesToRender = useMemo(
     () => {
+      if (activeOperationalViewKey) return visibleOperationalQueueIssues;
       if (tab === "mine") return visibleMineIssues;
       if (tab === "unread") return unreadTouchedIssues;
       return visibleTouchedIssues;
     },
-    [tab, visibleMineIssues, visibleTouchedIssues, unreadTouchedIssues],
+    [activeOperationalViewKey, tab, unreadTouchedIssues, visibleMineIssues, visibleOperationalQueueIssues, visibleTouchedIssues],
   );
 
   const agentById = useMemo(() => {
@@ -1041,12 +1076,21 @@ export function Inbox() {
   const workItemsToRender = useMemo(
     () =>
       getInboxWorkItems({
-        issues: tab === "all" && !showTouchedCategory ? [] : issuesToRender,
-        approvals: tab === "all" && !showApprovalsCategory ? [] : approvalsToRender,
-        failedRuns: failedRunsForTab,
-        joinRequests: joinRequestsForTab,
+        issues: tab === "all" && !activeOperationalViewKey && !showTouchedCategory ? [] : issuesToRender,
+        approvals: activeOperationalViewKey ? [] : (tab === "all" && !showApprovalsCategory ? [] : approvalsToRender),
+        failedRuns: activeOperationalViewKey ? [] : failedRunsForTab,
+        joinRequests: activeOperationalViewKey ? [] : joinRequestsForTab,
       }),
-    [approvalsToRender, issuesToRender, showApprovalsCategory, showTouchedCategory, tab, failedRunsForTab, joinRequestsForTab],
+    [
+      activeOperationalViewKey,
+      approvalsToRender,
+      failedRunsForTab,
+      issuesToRender,
+      joinRequestsForTab,
+      showApprovalsCategory,
+      showTouchedCategory,
+      tab,
+    ],
   );
 
   const filteredWorkItems = useMemo(() => {
@@ -1280,6 +1324,34 @@ export function Inbox() {
     updateFilterPreferences((previous) => ({
       ...previous,
       issueFilters: { ...previous.issueFilters, ...patch },
+    }));
+  }, [updateFilterPreferences]);
+  const applyOperationalView = useCallback((viewKey: string) => {
+    const view = operationalViews.find((candidate) => candidate.key === viewKey);
+    if (!view) return;
+    navigate("/inbox/all");
+    updateFilterPreferences((previous) => ({
+      ...previous,
+      issueFilters: view.filterState,
+    }));
+  }, [navigate, operationalViews, updateFilterPreferences]);
+  const clearOperationalView = useCallback(() => {
+    updateFilterPreferences((previous) => ({
+      ...previous,
+      issueFilters: {
+        ...previous.issueFilters,
+        statuses: [],
+        priorities: [],
+        owners: [],
+        assignees: [],
+        creators: [],
+        labels: [],
+        projects: [],
+        workspaces: [],
+        needsHumanAttention: false,
+        blockedOrWaiting: false,
+        recentHandoffs: false,
+      },
     }));
   }, [updateFilterPreferences]);
   const updateAllCategoryFilter = useCallback((value: InboxCategoryFilter) => {
@@ -2057,6 +2129,46 @@ export function Inbox() {
               </SelectContent>
             </Select>
           )}
+        </div>
+      )}
+
+      {operationalViews.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
+              Operational Views
+            </p>
+            {activeOperationalViewKey ? (
+              <button
+                type="button"
+                className="text-xs text-muted-foreground hover:text-foreground"
+                onClick={clearOperationalView}
+              >
+                Clear view
+              </button>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {operationalViews.map((view) => {
+              const isActive = activeOperationalViewKey === view.key;
+              return (
+                <button
+                  key={view.key}
+                  type="button"
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
+                    isActive
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground",
+                  )}
+                  onClick={() => applyOperationalView(view.key)}
+                  title={view.description}
+                >
+                  {view.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
